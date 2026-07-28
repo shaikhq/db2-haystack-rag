@@ -17,7 +17,7 @@ venv/
 .idea/
 .DS_Store
 
-# Local data
+# Local data — the sample PDF is tracked, anything else you drop in is not
 data/*
-!data/samples/
+!data/docling-technical-report.pdf
 logs/

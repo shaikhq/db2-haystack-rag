@@ -20,6 +20,12 @@ EMBED_BASE_URL = os.getenv("EMBED_BASE_URL", "http://127.0.0.1:8081/v1")
 EMBED_MODEL = os.getenv("EMBED_MODEL", "bge-small-en-v1.5")
 EMBED_DIM = 384  # bge-small-en-v1.5 produces 384 numbers per embedding
 
+# The chunker counts tokens with the same tokenizer the embedding model uses.
+# bge-small accepts 512; we ask for less because Docling prepends section headings
+# to each chunk after the budget is applied, which can push it a little over.
+EMBED_TOKENIZER = "BAAI/bge-small-en-v1.5"
+EMBED_MAX_TOKENS = 448
+
 CHAT_BASE_URL = os.getenv("CHAT_BASE_URL", "http://127.0.0.1:8080/v1")
 CHAT_MODEL = os.getenv("CHAT_MODEL", "qwen2.5-3b-instruct")
 

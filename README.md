@@ -18,6 +18,7 @@ which used cloud Db2 and watsonx.ai.
 | `WatsonxChatGenerator` (`ibm/granite-3-2b-instruct`) | `OpenAIChatGenerator` → llama.cpp, Qwen2.5-3B-Instruct |
 | `PromptBuilder` | `ChatPromptBuilder` (Haystack 3.x chat interface) |
 | watsonx API key + project ID | Dummy key + `api_base_url` — llama.cpp ignores the key |
+| Hardcoded sample documents | A real PDF, parsed by **Docling** (`DoclingConverter`) |
 
 llama.cpp's server speaks the OpenAI API, so Haystack's stock OpenAI components work against it
 unchanged. One `llama-server` process serves one model, so embeddings and generation run as two
@@ -128,33 +129,71 @@ cp .env.example .env      # then fill in DB2_PASSWORD
 
 ## Usage
 
-Two scripts. Store the documents, then ask questions.
+Two scripts. Parse and store the PDF, then ask questions about it.
 
 ```bash
 export PYTHONPATH=src
 
-.venv/bin/python -m haystack_db2_rag.index
-.venv/bin/python -m haystack_db2_rag.ask "Which savings account has no minimum balance?"
+.venv/bin/python -m haystack_db2_rag.index data/docling-technical-report.pdf
+.venv/bin/python -m haystack_db2_rag.ask "What is Docling and what formats can it convert?"
 ```
 
-Pass a product type as a second argument to filter on metadata before the vector search:
+The sample PDF is the [Docling Technical Report](https://arxiv.org/abs/2408.09869) — any PDF,
+DOCX or HTML file works, since Docling handles the parsing.
+
+Pass a page number as a second argument to filter on metadata before the vector search:
 
 ```bash
-.venv/bin/python -m haystack_db2_rag.ask "What are the risks?" investment
+.venv/bin/python -m haystack_db2_rag.ask "What are the results?" 4
 ```
 
 Example output:
 
 ```
-Q: Which savings account has no minimum balance, and what rate does it pay?
+Q: What is Docling and what formats can it convert?
 
-A: The Everyday Savings Account has no minimum balance and pays 2.1% APY.
+A: Docling is an open-source document conversion tool designed to convert PDF documents
+   to JSON or Markdown format. It is built on powerful AI models and datasets for layout
+   analysis and table structure recognition.
 
 Retrieved:
-  [0.209] savings: The Everyday Savings Account pays 2.1% APY with no minimum balance and...
-  [0.225] savings: The Premier High-Yield Savings Account pays 4.35% APY but requires a $...
-  [0.333] checking: The Student Checking Account has no minimum balance, no overdraft fee ...
+  [0.173] p.2 2 Getting Started: 2 Getting Started To use Docling, you can simply insta...
+  [0.190] p.1 1 Introduction: 1 Introduction Converting PDF documents back into a machin...
+  [0.231] p.5 6 Future work and contributions: Docling is designed to allow...
 ```
+
+The first `index` run downloads Docling's layout and table-structure models (a few hundred MB)
+and the bge tokenizer. After that it works offline.
+
+## How the PDF is chunked
+
+`DoclingConverter` runs with `ExportType.DOC_CHUNKS` and Docling's `HybridChunker`:
+
+```python
+chunker = HybridChunker(
+    tokenizer=HuggingFaceTokenizer.from_pretrained("BAAI/bge-small-en-v1.5", max_tokens=448)
+)
+```
+
+This is the recommended pairing when Docling does the parsing, rather than Haystack's generic
+`DocumentSplitter`:
+
+- `HybridChunker` splits on the document's **own structure** — sections, headings, tables — which
+  is precisely what Docling recovers. `DocumentSplitter` splits by word or sentence count and
+  discards that structure.
+- It is **tokenizer-aware**: give it the embedding model's tokenizer and no chunk overflows the
+  model's context window. Overflow is silent — the server truncates and you lose the tail of the
+  chunk with no error.
+- Section headings and page numbers survive into `doc.meta`, which is what makes the citations in
+  the output above possible.
+
+The budget is 448 rather than bge's full 512 because Docling prepends section headings to each
+chunk *after* the budget is applied. At 512 exactly, one chunk in this PDF came out at 519 tokens
+and was silently truncated.
+
+Db2 stores metadata as BSON, which forbids field names beginning with `$`. Docling's full
+`dl_meta` contains `$ref` keys, so `index.py` passes a small `SimpleMeta` extractor that keeps
+just the page number and headings. Without it every insert fails with `SQL0443N ... JSON2BSON`.
 
 Lower scores are closer — they are cosine *distances*, not similarities.
 
@@ -174,12 +213,13 @@ natively, not as a blob.
 ```
 src/haystack_db2_rag/
   settings.py     everything read from .env
-  documents.py    sample banking-product corpus with filterable metadata
   store.py        connects to Db2 and creates the table
-  index.py        embedder -> writer
+  index.py        converter -> embedder -> writer
   ask.py          text_embedder -> retriever -> prompt_builder -> generator
 scripts/
   llama-servers.sh
+data/
+  docling-technical-report.pdf    the sample document
 ```
 
 The code is deliberately minimal — no error handling, no retries, no edge cases — so each file

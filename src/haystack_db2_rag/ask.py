@@ -1,10 +1,10 @@
 """Answer a question using the documents stored in Db2.
 
-    PYTHONPATH=src .venv/bin/python -m haystack_db2_rag.ask "is there a fee for the student account?"
+    PYTHONPATH=src .venv/bin/python -m haystack_db2_rag.ask "what is Docling?"
 
-Add a product type to filter on metadata before the search:
+Add a page number to filter on metadata before the search:
 
-    PYTHONPATH=src .venv/bin/python -m haystack_db2_rag.ask "what rate do I get?" savings
+    PYTHONPATH=src .venv/bin/python -m haystack_db2_rag.ask "what are the results?" 4
 
 The pipeline is four components:
     text_embedder -> retriever -> prompt_builder -> generator
@@ -23,14 +23,14 @@ from haystack_integrations.components.retrievers.ibm_db import IBMDb2EmbeddingRe
 from . import settings
 from .store import document_store
 
-question = sys.argv[1] if len(sys.argv) > 1 else "Which account has no minimum balance?"
+question = sys.argv[1] if len(sys.argv) > 1 else "What is Docling?"
 filters = (
-    {"field": "meta.product_type", "operator": "==", "value": sys.argv[2]}
+    {"field": "meta.page_number", "operator": "==", "value": int(sys.argv[2])}
     if len(sys.argv) > 2
     else None
 )
 
-PROMPT = """Answer the question using only these banking product documents.
+PROMPT = """Answer the question using only these excerpts from the document.
 
 {% for doc in documents %}
 {{ doc.content }}
@@ -82,4 +82,4 @@ print(f"\nQ: {question}")
 print(f"\nA: {result['generator']['replies'][0].text}\n")
 print("Retrieved:")
 for doc in result["retriever"]["documents"]:
-    print(f"  [{doc.score:.3f}] {doc.meta['product_type']}: {doc.content[:70]}...")
+    print(f"  [{doc.score:.3f}] p.{doc.meta['page_number']} {doc.meta['headings']}: {doc.content[:60]}...")
