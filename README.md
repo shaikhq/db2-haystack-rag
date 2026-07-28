@@ -1,4 +1,4 @@
-# RAG on IBM Db2 12.1.5 with Haystack, Docling, and llama.cpp
+# RAG on IBM Db2 12.1.5 with Haystack, Docling, and local models
 
 This tutorial builds **retrieval-augmented generation over your own PDF**, using IBM Db2 as the
 vector database and nothing but local models:
@@ -7,8 +7,9 @@ vector database and nothing but local models:
 - **Vector similarity** — `VECTOR_DISTANCE` (cosine), through Haystack's Db2 integration
 - **Document parsing** — [Docling](https://github.com/docling-project/docling) turns a PDF into
   structured, chunked text that keeps its headings and page numbers
-- **Embeddings and generation** — a local llama.cpp server exposing an OpenAI-compatible API,
-  so Haystack's stock OpenAI components work unchanged. No API keys, no cloud, no per-call cost
+- **Embeddings and generation** — two models running on your own machine, served by
+  [llama.cpp](https://github.com/ggml-org/llama.cpp) behind an OpenAI-compatible API, so
+  Haystack's stock OpenAI components work unchanged. No API keys, no cloud, no per-call cost
 - **Orchestration** — [Haystack](https://haystack.deepset.ai/) pipelines, four components end to end
 
 **The use case: ask questions about a research paper.** The shipped document is
@@ -42,7 +43,7 @@ which used cloud Db2 and watsonx.ai — see
 - [Full setup on a fresh RHEL box](#full-setup-on-a-fresh-rhel-box) ← the main guide
   - [Step 1 — Db2 12.1.5 + instance](#step-1--db2-1215--instance)
   - [Step 2 — Configure Db2 and create the database](#step-2--configure-db2-and-create-the-database)
-  - [Step 3 — llama.cpp + the two models](#step-3--llamacpp--the-two-models)
+  - [Step 3 — The local models](#step-3--the-local-models)
   - [Step 4 — Get the code](#step-4--get-the-code)
   - [Step 5 — Python project](#step-5--python-project)
   - [Step 6 — Configure `.env`](#step-6--configure-env)
@@ -119,8 +120,8 @@ Two llama.cpp servers, because one `llama-server` process serves one model.
 ## Full setup on a fresh RHEL box
 
 **What you're building, in order:** Db2 (the database + vector engine) → an instance and the
-`SAMPLE` database → a local llama.cpp server + two models → the project code → the Python
-project → your `.env` → the running servers. Then you ingest and ask.
+`SAMPLE` database → the two local models → the project code → the Python project → your `.env`
+→ the running servers. Then you ingest and ask.
 
 **Time & footprint:** ~30–45 min, mostly downloads. CPU-only is fine — **no GPU needed**.
 Disk, measured on this box:
@@ -237,7 +238,7 @@ A row count means Db2 is up and reachable. The project's table is created for yo
 
 ---
 
-### Step 3 — llama.cpp + the two models
+### Step 3 — The local models
 
 **(db2inst1)** Db2 stores the vectors, but something has to *produce* them — and answer questions.
 Both jobs run locally through llama.cpp's OpenAI-compatible server: no API keys, no network
