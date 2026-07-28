@@ -134,12 +134,12 @@ Two scripts. Parse and store the PDF, then ask questions about it.
 ```bash
 export PYTHONPATH=src
 
-.venv/bin/python -m haystack_db2_rag.index data/docling-technical-report.pdf
-.venv/bin/python -m haystack_db2_rag.ask "What is Docling and what formats can it convert?"
+.venv/bin/python -m haystack_db2_rag.index data/M-Lean_Article.pdf
+.venv/bin/python -m haystack_db2_rag.ask "What is M-Lean?"
 ```
 
-The sample PDF is the [Docling Technical Report](https://arxiv.org/abs/2408.09869) — any PDF,
-DOCX or HTML file works, since Docling handles the parsing.
+Put a PDF in `data/` and pass its path. Any PDF, DOCX or HTML file works, since Docling handles
+the parsing. PDFs in `data/` are gitignored.
 
 Pass a page number as a second argument to filter on metadata before the vector search:
 
@@ -150,17 +150,21 @@ Pass a page number as a second argument to filter on metadata before the vector 
 Example output:
 
 ```
-Q: What is Docling and what formats can it convert?
+Q: What is M-Lean and what problem does it solve?
 
-A: Docling is an open-source document conversion tool designed to convert PDF documents
-   to JSON or Markdown format. It is built on powerful AI models and datasets for layout
-   analysis and table structure recognition.
+A: M-Lean is a framework designed to help businesses transform their data into actionable
+   predictive models. It addresses the problem of uncertainty that arises when applying
+   machine learning techniques to solve business problems. It uses the Lean Startup
+   methodology to maximize the business value of developed predictive models while
+   eliminating wasteful development practices.
 
 Retrieved:
-  [0.173] p.2 2 Getting Started: 2 Getting Started To use Docling, you can simply insta...
-  [0.190] p.1 1 Introduction: 1 Introduction Converting PDF documents back into a machin...
-  [0.231] p.5 6 Future work and contributions: Docling is designed to allow...
+  [0.295] p.1 M-Lean: An end-to-end development framework for predictive models in B2B...
+  [0.368] p.4 5. Proposed framework design: Table 1 Proposed framework vs. ...
+  [0.403] p.1 a b s t r a c t: Consequently, for the last few years, there ...
 ```
+
+Lower scores are closer — they are cosine *distances*, not similarities.
 
 The first `index` run downloads Docling's layout and table-structure models (a few hundred MB)
 and the bge tokenizer. After that it works offline.
@@ -195,8 +199,6 @@ Db2 stores metadata as BSON, which forbids field names beginning with `$`. Docli
 `dl_meta` contains `$ref` keys, so `index.py` passes a small `SimpleMeta` extractor that keeps
 just the page number and headings. Without it every insert fails with `SQL0443N ... JSON2BSON`.
 
-Lower scores are closer — they are cosine *distances*, not similarities.
-
 Verify the vectors landed, straight from SQL:
 
 ```bash
@@ -219,7 +221,7 @@ src/haystack_db2_rag/
 scripts/
   llama-servers.sh
 data/
-  docling-technical-report.pdf    the sample document
+  <your.pdf>      the document to index (gitignored)
 ```
 
 The code is deliberately minimal — no error handling, no retries, no edge cases — so each file

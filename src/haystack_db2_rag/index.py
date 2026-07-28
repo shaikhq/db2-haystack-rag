@@ -1,6 +1,6 @@
 """Convert a PDF with Docling, embed the chunks, and store them in Db2.
 
-    PYTHONPATH=src .venv/bin/python -m haystack_db2_rag.index data/docling-technical-report.pdf
+    PYTHONPATH=src .venv/bin/python -m haystack_db2_rag.index data/M-Lean_Article.pdf
 
 The pipeline is three components:  converter -> embedder -> writer
 """
@@ -22,7 +22,7 @@ from haystack_integrations.components.converters.docling import (
 from . import settings
 from .store import document_store
 
-pdf = sys.argv[1] if len(sys.argv) > 1 else "data/docling-technical-report.pdf"
+pdf = sys.argv[1] if len(sys.argv) > 1 else "data/M-Lean_Article.pdf"
 
 
 class SimpleMeta(BaseMetaExtractor):
