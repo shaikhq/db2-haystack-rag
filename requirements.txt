@@ -1,0 +1,4 @@
+haystack-ai
+ibm-db-haystack
+watsonx-haystack
+python-dotenv
