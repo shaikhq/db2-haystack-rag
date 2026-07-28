@@ -1,57 +1,268 @@
-# haystack-db2-rag
+# RAG on IBM Db2 12.1.5 with Haystack, Docling, and llama.cpp
 
-Retrieval-augmented generation with [Haystack](https://haystack.deepset.ai/), **IBM Db2** as the
-vector store, and a **local llama.cpp server** for embeddings and generation. No cloud services,
-no API keys, no network egress at query time.
+This tutorial builds **retrieval-augmented generation over your own PDF**, using IBM Db2 as the
+vector database and nothing but local models:
+
+- **Vector storage** — native Db2 `VECTOR` columns
+- **Vector similarity** — `VECTOR_DISTANCE` (cosine), through Haystack's Db2 integration
+- **Document parsing** — [Docling](https://github.com/docling-project/docling) turns a PDF into
+  structured, chunked text that keeps its headings and page numbers
+- **Embeddings and generation** — a local llama.cpp server exposing an OpenAI-compatible API,
+  so Haystack's stock OpenAI components work unchanged. No API keys, no cloud, no per-call cost
+- **Orchestration** — [Haystack](https://haystack.deepset.ai/) pipelines, four components end to end
+
+**The use case: ask questions about a research paper.** The shipped document is
+`data/M-Lean_Article.pdf` — a 15-page journal article on a framework for building predictive
+models in B2B settings. Any PDF, DOCX, or HTML file works; swap it and re-run.
+
+**Ingestion.** Docling parses the PDF into its real structure, `HybridChunker` splits it on
+section boundaries into 70 chunks sized to the embedding model's token budget, each chunk is
+vectorized by the local embedding server, and the text, metadata, and 384-dimension vector land
+in one Db2 table.
+
+**Ask.** Your question is embedded by the same model, Db2 ranks every chunk by cosine distance,
+the top 3 are pasted into a prompt, and the local chat model answers from them — citing the page
+and section each excerpt came from.
+
+This README takes you from **a bare Red Hat machine to answered questions**, one command at a
+time. No prior Db2, Haystack, or embeddings experience assumed. Every command is one you can copy
+and run on its own, and each step ends with something you can check before moving on.
 
 Recreated from the IBM Community tutorial
 [Agentic Workflows with Haystack and IBM Db2](https://community.ibm.com/community/user/blogs/dhruv-chaturvedi/2026/07/10/agentic-workflows-with-haystack-and-ibm-db2),
-which used cloud Db2 and watsonx.ai.
+which used cloud Db2 and watsonx.ai — see
+[What changed from the IBM tutorial](#what-changed-from-the-ibm-tutorial).
 
-## What changed from the tutorial
+---
 
-| Tutorial | Here |
+## Contents
+
+- [What it does & why](#what-it-does--why)
+- [Architecture](#architecture-one-pdf-many-chunks-one-vector-column)
+- [Full setup on a fresh RHEL box](#full-setup-on-a-fresh-rhel-box) ← the main guide
+  - [Step 1 — Db2 12.1.5 + instance](#step-1--db2-1215--instance)
+  - [Step 2 — Configure Db2 and create the database](#step-2--configure-db2-and-create-the-database)
+  - [Step 3 — llama.cpp + the two models](#step-3--llamacpp--the-two-models)
+  - [Step 4 — Get the code](#step-4--get-the-code)
+  - [Step 5 — Python project](#step-5--python-project)
+  - [Step 6 — Configure `.env`](#step-6--configure-env)
+  - [Step 7 — Start the servers & verify](#step-7--start-the-servers--verify)
+- [Run the pipeline](#run-the-pipeline-index--ask)
+- [Try it: example questions](#try-it-example-questions)
+- [How the PDF is chunked](#how-the-pdf-is-chunked-and-why-not-documentsplitter)
+- [Verify the vectors in Db2](#verify-the-vectors-in-db2)
+- [Configuration](#configuration)
+- [Troubleshooting](#troubleshooting)
+- [What changed from the IBM tutorial](#what-changed-from-the-ibm-tutorial)
+- [Repository layout](#repository-layout)
+
+---
+
+## What it does & why
+
+A language model can only answer from what it was trained on — it has never seen your PDF, and
+asked about it directly it will invent a plausible answer. RAG fixes that by *retrieving* the
+relevant passages first and making the model answer from those.
+
+That makes retrieval quality the whole game, and retrieval quality starts with **how the document
+was cut up**. Most tutorials pull raw text out of a PDF and slice it every N characters, which
+cuts sentences in half, merges a table with the paragraph after it, and loses any notion of which
+section or page a passage came from. The answers are then vague and impossible to verify.
+
+This project keeps the document's structure all the way through:
+
+- **Docling** recovers the real layout — headings, sections, tables, reading order, page numbers
+- **`HybridChunker`** splits on those structural boundaries rather than a character count, and
+  packs each chunk to a token budget measured with the *embedding model's own tokenizer*
+- **Db2** stores the text, the structural metadata, and the vector in one row, so a similarity
+  search returns a passage that knows what section and page it came from
+- The answer therefore comes with **citations** — `p.4 5. Proposed framework design` — that you
+  can check against the original
+
+Everything runs locally. The embedding model (bge-small-en-v1.5, 37 MB) and the chat model
+(Qwen2.5-3B-Instruct, 2 GB) are served by llama.cpp on this machine, so no document text ever
+leaves the box and there is no API bill.
+
+## Architecture: one PDF, many chunks, one VECTOR column
+
+```
+data/M-Lean_Article.pdf
+        │  index.py  (converter → embedder → writer)
+        ▼
+   Docling  ──→  HybridChunker            70 chunks, each carrying
+   (layout,       (448-token budget,      page_number + headings
+    tables,        bge tokenizer)
+    headings)
+        │
+        ▼
+   OpenAIDocumentEmbedder ──→ llama.cpp :8081  (bge-small-en-v1.5 → 384 floats)
+        │
+        ▼
+   Db2  HAYSTACK_DOCUMENTS (ID, CONTENT, META, EMBEDDING VECTOR(384))
+        ▲
+        │  ask.py  (text_embedder → retriever → prompt_builder → generator)
+        │
+  your question ──→ OpenAITextEmbedder ──→ llama.cpp :8081
+                            │
+                            ▼
+                    IBMDb2EmbeddingRetriever   cosine VECTOR_DISTANCE, top 3
+                            │
+                            ▼
+                    ChatPromptBuilder ──→ OpenAIChatGenerator ──→ llama.cpp :8080
+                                                                  (Qwen2.5-3B-Instruct)
+```
+
+Two llama.cpp servers, because one `llama-server` process serves one model.
+
+---
+
+## Full setup on a fresh RHEL box
+
+**What you're building, in order:** Db2 (the database + vector engine) → an instance and the
+`SAMPLE` database → a local llama.cpp server + two models → the project code → the Python
+project → your `.env` → the running servers. Then you ingest and ask.
+
+**Time & footprint:** ~30–45 min, mostly downloads. CPU-only is fine — **no GPU needed**.
+Disk, measured on this box:
+
+| Item | Size |
 | --- | --- |
-| Cloud Db2 (`BLUDB`, port 50001, `SECURITY=SSL`) | Local Db2 instance, `SAMPLE`, port 50000, no SSL |
-| `Db2DocumentStore`, `Db2EmbeddingRetriever` | `IBMDb2DocumentStore`, `IBMDb2EmbeddingRetriever` — the class names in `ibm-db-haystack` 0.2.0; the blog's names are from an earlier release |
-| `WatsonxDocumentEmbedder` / `WatsonxTextEmbedder` (`ibm/slate-125m-english-rtrvr`) | `OpenAIDocumentEmbedder` / `OpenAITextEmbedder` → llama.cpp, bge-small-en-v1.5, **dim 384** |
-| `WatsonxChatGenerator` (`ibm/granite-3-2b-instruct`) | `OpenAIChatGenerator` → llama.cpp, Qwen2.5-3B-Instruct |
-| `PromptBuilder` | `ChatPromptBuilder` (Haystack 3.x chat interface) |
-| watsonx API key + project ID | Dummy key + `api_base_url` — llama.cpp ignores the key |
-| Hardcoded sample documents | A real PDF, parsed by **Docling** (`DoclingConverter`) |
+| `~/llama.cpp` (source + build) | 263 MB |
+| `~/models` (the two GGUFs) | 2.0 GB |
+| `.venv` (Docling pulls in torch + transformers) | 5.7 GB |
+| Docling's layout models, cached on first run | 507 MB |
+| **Total** | **~8.5 GB** |
 
-llama.cpp's server speaks the OpenAI API, so Haystack's stock OpenAI components work against it
-unchanged. One `llama-server` process serves one model, so embeddings and generation run as two
-processes on two ports.
+**You will need:** root/sudo for Step 1, the **Db2 12.1.5 server install media** (an IBM
+entitlement — everything else downloads freely), and internet access. `git`, `gcc-c++`, `make`,
+`curl`, and Python 3.12 ship with RHEL 10; `cmake` does not and is installed below.
 
-## Requirements
+The whole stack runs as **one user, `db2inst1`** (the Db2 instance owner). Step 1 is system-level
+and runs as **root**; from Step 2 on you work as `db2inst1` (`su - db2inst1`). Each step is
+marked **(root)** or **(db2inst1)** so you always know which identity to use.
 
-- Db2 **12.1.2 or later** (native `VECTOR` type; verified on 12.1.5.0)
-- Python 3.10+ (verified on 3.12)
-- A C++ toolchain and CMake for building llama.cpp
-- ~2.1 GB of disk for the two models
+**Verified on:** RHEL 10.0, Db2 12.1.5.0, Python 3.12.13, 16 cores / 30 GB RAM, no GPU.
 
-## Setup
+---
 
-### 1. llama.cpp and the models
+### Step 1 — Db2 12.1.5 + instance
 
-Build `llama-server` from a pinned tag, CPU-only:
+> **The one step not executed on the machine this guide was written on** — Db2 was already
+> installed here. Everything from Step 2 onward was run end to end. These commands follow the
+> standard Db2 install; if your environment differs, IBM's installation docs are authoritative.
+
+**(root)** You provide the Db2 12.1.5 server install media (the example assumes the tarball
+`v12.1.5_linuxx64_server_dec.tar.gz`).
+
+**1.1 — Install the one Db2 prerequisite.** On RHEL 10 the missing library is `libxcrypt-compat`
+(it provides the legacy `libcrypt.so.1`; without it `db2_install` fails with `DBT3507E`):
 
 ```bash
-sudo dnf install -y cmake            # or: pip install --user cmake
+sudo dnf install -y libxcrypt-compat
+```
+
+**1.2 — Install the Db2 binaries and verify:**
+
+```bash
+tar -xvf v12.1.5_linuxx64_server_dec.tar.gz
+cd server_dec
+./db2_install
+db2ls
+```
+
+`db2ls` lists the installed copy (e.g. under `/opt/ibm/db2/V12.1`) — confirmation that
+`db2_install` succeeded.
+
+> **Reading `db2_install`'s prerequisite check — `E` vs `W`:** a `DBT3507E` (**error**, e.g. the
+> missing `libxcrypt-compat`) aborts the install and must be fixed. `DBT3514W` (**warnings**) for
+> the 32-bit `.i686` libraries are only required for 32-bit non-SQL routines — this stack uses
+> none, so ignore them.
+
+**1.3 — Create the instance owner and the instance.** `db2inst1` is also the fenced user, and the
+single account the rest of this guide runs as:
+
+```bash
+useradd db2inst1
+passwd db2inst1
+cd /opt/ibm/db2/V12.1/instance
+./db2icrt -u db2inst1 -nosharedgroup db2inst1
+```
+
+Remember the password you set — Db2 authenticates against the **operating system**, so this is
+the password that goes in `.env` at Step 6.
+
+---
+
+### Step 2 — Configure Db2 and create the database
+
+**(db2inst1)** Switch to the instance owner. Everything from here runs as `db2inst1`:
+
+```bash
+su - db2inst1
+```
+
+**2.1 — Turn on the TCP listener and start the instance.** The Python client connects over TCP,
+so `DB2COMM` must include TCPIP:
+
+```bash
+db2set DB2COMM=TCPIP
+db2start
+db2 get dbm cfg | grep SVCENAME
+```
+
+**You should see:** `DB2START processing was successful`, and an `SVCENAME` value — the port (or
+service name) the instance listens on. Note it; it goes in `.env` as `DB2_PORT`. On this box it
+is `50000`.
+
+**2.2 — Create the `SAMPLE` database** (any database works — `SAMPLE` is just the default in
+`.env.example`):
+
+```bash
+db2sampl
+```
+
+**2.3 — Confirm the database answers:**
+
+```bash
+db2 connect to SAMPLE
+db2 "SELECT COUNT(*) FROM SYSCAT.TABLES"
+db2 connect reset
+```
+
+A row count means Db2 is up and reachable. The project's table is created for you at ingest time
+— nothing to do here.
+
+> Db2 **12.1.2 or later** is required: the native `VECTOR` type does not exist before it. Check
+> with `db2level`. This guide is written against 12.1.5.0.
+
+---
+
+### Step 3 — llama.cpp + the two models
+
+**(db2inst1)** Db2 stores the vectors, but something has to *produce* them — and answer questions.
+Both jobs run locally through llama.cpp's OpenAI-compatible server: no API keys, no network
+egress, no per-call cost.
+
+**3.1 — Build `llama-server`** (CPU; pinned to a known-good tag):
+
+```bash
+sudo dnf install -y cmake            # or, without sudo: pip install --user cmake
 git clone --depth 1 --branch b9913 https://github.com/ggml-org/llama.cpp.git ~/llama.cpp
 cmake -S ~/llama.cpp -B ~/llama.cpp/build -DCMAKE_BUILD_TYPE=Release \
       -DLLAMA_CURL=OFF -DGGML_NATIVE=ON -DLLAMA_BUILD_UI=OFF -DLLAMA_USE_PREBUILT_UI=OFF
 cmake --build ~/llama.cpp/build --target llama-server -j"$(nproc)"
 ```
 
-> `-DLLAMA_BUILD_UI=OFF -DLLAMA_USE_PREBUILT_UI=OFF` are required here. Without them the build
-> downloads a prebuilt WebUI bundle from Hugging Face that does not match tag b9913, and
+A few minutes on 16 cores. **You should see:** `Built target llama-server`, and the binary at
+`~/llama.cpp/build/bin/llama-server`.
+
+> **`-DLLAMA_BUILD_UI=OFF -DLLAMA_USE_PREBUILT_UI=OFF` are not optional.** Without them the build
+> downloads a prebuilt web-UI bundle from Hugging Face that does not match tag b9913, and
 > `llama-ui-embed` aborts the build with `missing required asset(s): loading.html`. We only need
 > the `/v1` API, not the browser UI. If you hit that error after a partial build, delete
 > `~/llama.cpp/build/tools/ui` before rebuilding — the stale asset directory is re-validated.
 
-Embedding model (bge-small-en-v1.5, ~37 MB):
+**3.2 — Download the embedding model** (bge-small-en-v1.5, ~37 MB):
 
 ```bash
 mkdir -p ~/models/bge-small-en-v1.5
@@ -59,7 +270,7 @@ curl -fSL -o ~/models/bge-small-en-v1.5/bge-small-en-v1.5-q8_0.gguf \
   "https://huggingface.co/CompendiumLabs/bge-small-en-v1.5-gguf/resolve/main/bge-small-en-v1.5-q8_0.gguf"
 ```
 
-Generation model (Qwen2.5-3B-Instruct, ~2 GB):
+**3.3 — Download the generation model** (Qwen2.5-3B-Instruct, ~2 GB):
 
 ```bash
 mkdir -p ~/models/qwen2.5-3b-instruct
@@ -67,8 +278,8 @@ curl -fSL -o ~/models/qwen2.5-3b-instruct/Qwen2.5-3B-Instruct-Q4_K_M.gguf \
   "https://huggingface.co/Qwen/Qwen2.5-3B-Instruct-GGUF/resolve/main/qwen2.5-3b-instruct-q4_k_m.gguf"
 ```
 
-Sanity-test each on a throwaway port. `--pooling cls` is required for bge — the wrong pooling
-silently degrades quality:
+**3.4 — Sanity-test the embedding model** (start on a throwaway port `:8099`, embed once, stop).
+`--pooling cls` is required — the wrong pooling silently degrades quality:
 
 ```bash
 ~/llama.cpp/build/bin/llama-server -m ~/models/bge-small-en-v1.5/bge-small-en-v1.5-q8_0.gguf \
@@ -80,7 +291,9 @@ curl -s http://127.0.0.1:8099/v1/embeddings -H 'Content-Type: application/json' 
 fuser -k 8099/tcp
 ```
 
-Expect `dim 384`.
+**You should see:** `dim 384`.
+
+**3.5 — Sanity-test the generation model:**
 
 ```bash
 ~/llama.cpp/build/bin/llama-server -m ~/models/qwen2.5-3b-instruct/Qwen2.5-3B-Instruct-Q4_K_M.gguf \
@@ -92,44 +305,90 @@ curl -s http://127.0.0.1:8099/v1/chat/completions -H 'Content-Type: application/
 fuser -k 8099/tcp
 ```
 
-A short reply means it works; failures land in `/tmp/sanity.log`.
+**You should see:** `reply: Hello`. Failures land in `/tmp/sanity.log`.
 
 > Use `curl -sf`, not `curl -s`, in the readiness loop. `/health` answers **503** while the model
-> is still loading, and without `-f` curl treats that as success — the loop exits early and the
-> first request fails with a confusing error.
+> loads, and without `-f` curl treats that as success — the loop exits after one second and the
+> request fails with a confusing `KeyError: 'choices'`.
 
-### 2. The long-running servers
+These were throwaway servers. Step 7 starts the real ones on their proper ports.
 
-```bash
-scripts/llama-servers.sh start     # embeddings :8081, chat :8080
-scripts/llama-servers.sh status
-scripts/llama-servers.sh stop
-```
+---
 
-Logs go to `logs/`.
+### Step 4 — Get the code
 
-### 3. Db2
+**(db2inst1)** Clone into `db2inst1`'s home:
 
 ```bash
-db2start
-db2 connect to SAMPLE
+cd ~
+git clone <your-repo-url> haystack-db2-rag
+cd haystack-db2-rag
 ```
 
-The document store creates its own table (`HAYSTACK_DOCUMENTS` by default) on first use. Db2
-requires a real password for TCP connections (`AUTHENTICATION=SERVER`), so `DB2_PASSWORD` in
-`.env` must be the OS password of the instance user.
+The sample PDF (`data/M-Lean_Article.pdf`) ships with the repo, so there is nothing else to
+download.
 
-### 4. Python
+---
+
+### Step 5 — Python project
+
+**(db2inst1)** A virtualenv with Haystack, the Db2 integration, and Docling:
 
 ```bash
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
-cp .env.example .env      # then fill in DB2_PASSWORD
 ```
 
-## Usage
+This is the big download — Docling depends on torch and transformers, so expect ~5.7 GB and
+several minutes.
 
-Two scripts. Parse and store the PDF, then ask questions about it.
+---
+
+### Step 6 — Configure `.env`
+
+**(db2inst1)**
+
+```bash
+cp .env.example .env
+$EDITOR .env
+```
+
+Set **`DB2_PASSWORD`** to the *operating-system* password of `db2inst1` (the one from Step 1.3) —
+Db2 runs with `AUTHENTICATION=SERVER`, so it authenticates against the OS, not a database user.
+Set `DB2_PORT` if your `SVCENAME` from Step 2.1 is not `50000`. The remaining defaults work as-is.
+
+`.env` is git-ignored — real credentials are never committed. See
+[`.env.example`](.env.example) for every key.
+
+---
+
+### Step 7 — Start the servers & verify
+
+**(db2inst1)** One script starts both llama.cpp servers — embeddings on `:8081`, chat on `:8080`
+— and waits until each is genuinely ready:
+
+```bash
+scripts/llama-servers.sh start
+scripts/llama-servers.sh status
+```
+
+**You should see:**
+
+```
+  embeddings  :8081  up    bge-small-en-v1.5
+  chat  :8080  up    qwen2.5-3b-instruct
+```
+
+Logs go to `logs/`. Stop them with `scripts/llama-servers.sh stop` when you're done for the day.
+
+That's the one-time setup — **everything below is the day-to-day workflow.**
+
+---
+
+## Run the pipeline (index → ask)
+
+Two commands. Parse and store the PDF, then ask it questions. Run from the repo root with the
+servers up and Db2 started.
 
 ```bash
 export PYTHONPATH=src
@@ -138,41 +397,77 @@ export PYTHONPATH=src
 .venv/bin/python -m haystack_db2_rag.ask "What is M-Lean?"
 ```
 
-`data/M-Lean_Article.pdf` ships with the repo, so a fresh clone runs as-is. Any other PDF, DOCX
-or HTML file works too — drop it in `data/` and pass its path. Only the sample is tracked; other
-files you put there stay out of git.
+`index` drops and recreates the table each run, so it is always safe to re-run.
+**You should see:** `Stored 70 chunks in HAYSTACK_DOCUMENTS.`
 
-Pass a page number as a second argument to filter on metadata before the vector search:
+> The **first** `index` run also downloads Docling's layout and table-structure models (~500 MB)
+> and the bge tokenizer. After that it works offline. Give the first run a few minutes.
+
+Pass any other document as the argument — PDF, DOCX, or HTML. Drop it in `data/`; only the sample
+PDF is tracked by git, so your own files stay out of the repo.
+
+Add a page number as a second argument to filter on metadata *before* the vector search:
 
 ```bash
-.venv/bin/python -m haystack_db2_rag.ask "What are the results?" 4
+.venv/bin/python -m haystack_db2_rag.ask "What does the proposed framework look like?" 4
 ```
 
-Example output:
+## Try it: example questions
+
+For the shipped paper. The principle is general: **the answer is only as good as the retrieved
+chunks, and every answer names where it came from.**
+
+**A question the document answers well** — the concept is stated in the abstract and the title:
 
 ```
-Q: What is M-Lean and what problem does it solve?
+$ .venv/bin/python -m haystack_db2_rag.ask "What is M-Lean?"
 
-A: M-Lean is a framework designed to help businesses transform their data into actionable
-   predictive models. It addresses the problem of uncertainty that arises when applying
-   machine learning techniques to solve business problems. It uses the Lean Startup
-   methodology to maximize the business value of developed predictive models while
-   eliminating wasteful development practices.
+Q: What is M-Lean?
+
+A: M-Lean is an end-to-end development framework designed for predictive models in B2B
+   scenarios. It addresses the challenges of data scientists building models that perform
+   well during the development phase but suffer from performance degradation upon
+   deployment...
 
 Retrieved:
-  [0.295] p.1 M-Lean: An end-to-end development framework for predictive models in B2B...
-  [0.368] p.4 5. Proposed framework design: Table 1 Proposed framework vs. ...
-  [0.403] p.1 a b s t r a c t: Consequently, for the last few years, there ...
+  [0.309] p.1 M-Lean: An end-to-end development framework for predictive models in B2B...
+  [0.418] p.4 5. Proposed framework design: Table 1 Proposed framework vs. ...
+  [0.430] p.4 5. Proposed framework design: build-measure-learn loop is th...
 ```
 
-Lower scores are closer — they are cosine *distances*, not similarities.
+Lower scores are closer — they are cosine **distances**, not similarities.
 
-The first `index` run downloads Docling's layout and table-structure models (a few hundred MB)
-and the bge tokenizer. After that it works offline.
+**A metadata-filtered question** — the page filter runs in Db2 before the similarity search, so
+every hit comes from page 4:
 
-## How the PDF is chunked
+```
+$ .venv/bin/python -m haystack_db2_rag.ask "What does the proposed framework look like?" 4
 
-`DoclingConverter` runs with `ExportType.DOC_CHUNKS` and Docling's `HybridChunker`:
+Retrieved:
+  [0.298] p.4 5. Proposed framework design: 5. Proposed framework design...
+  [0.302] p.4 5.1. Getting more from business data: ideas suggestions and data discovery...
+  [0.315] p.4 5.1. Getting more from business data: ideas suggestions and data discovery...
+```
+
+**A question the document cannot answer** — retrieval always returns *something* (the three
+least-bad chunks, at distances around 0.6), but the prompt tells the model to answer only from
+them, so it declines instead of inventing:
+
+```
+$ .venv/bin/python -m haystack_db2_rag.ask "What is the capital of France?"
+
+A: I'm sorry, but the question "What is the capital of France?" cannot be answered using only
+   the excerpts provided from the document... The document does not contain information about
+   capitals or geographical locations.
+```
+
+That last one is the behaviour to check after any change to the prompt or the retriever — a RAG
+system that answers this one has stopped being grounded.
+
+## How the PDF is chunked (and why not DocumentSplitter)
+
+`DoclingConverter` runs with `ExportType.DOC_CHUNKS` and Docling's `HybridChunker`
+([src/haystack_db2_rag/index.py](src/haystack_db2_rag/index.py)):
 
 ```python
 chunker = HybridChunker(
@@ -180,27 +475,31 @@ chunker = HybridChunker(
 )
 ```
 
-This is the recommended pairing when Docling does the parsing, rather than Haystack's generic
+This is the right pairing when Docling does the parsing, rather than Haystack's generic
 `DocumentSplitter`:
 
-- `HybridChunker` splits on the document's **own structure** — sections, headings, tables — which
-  is precisely what Docling recovers. `DocumentSplitter` splits by word or sentence count and
-  discards that structure.
-- It is **tokenizer-aware**: give it the embedding model's tokenizer and no chunk overflows the
-  model's context window. Overflow is silent — the server truncates and you lose the tail of the
-  chunk with no error.
-- Section headings and page numbers survive into `doc.meta`, which is what makes the citations in
-  the output above possible.
+1. `HybridChunker` splits on the document's **own structure** — sections, headings, tables —
+   which is precisely what Docling recovers. `DocumentSplitter` splits by word or sentence count
+   and discards that structure, so you pay for the parse and then throw the result away.
+2. It is **tokenizer-aware**: hand it the embedding model's tokenizer and no chunk overflows the
+   model's context window. Overflow is silent — the server truncates and you lose the tail of the
+   chunk with no error and no warning.
+3. Section headings and page numbers survive into `doc.meta`, which is what makes the citations
+   above possible.
 
-The budget is 448 rather than bge's full 512 because Docling prepends section headings to each
-chunk *after* the budget is applied. At 512 exactly, one chunk in this PDF came out at 519 tokens
-and was silently truncated.
+**Why 448 and not bge's full 512.** Docling prepends the section headings to each chunk *after*
+the token budget is applied. At `max_tokens=512` one chunk in this PDF came out at 519 tokens and
+was silently truncated. At 448 the same document yields 70 chunks with a median of 331 tokens and
+a maximum of 456 — all comfortably inside the window.
 
-Db2 stores metadata as BSON, which forbids field names beginning with `$`. Docling's full
-`dl_meta` contains `$ref` keys, so `index.py` passes a small `SimpleMeta` extractor that keeps
-just the page number and headings. Without it every insert fails with `SQL0443N ... JSON2BSON`.
+**Why the metadata is trimmed.** Db2 stores document metadata as BSON, which forbids field names
+beginning with `$`. Docling's full `dl_meta` contains `$ref` keys, so `index.py` passes a small
+`SimpleMeta` extractor keeping just the page number and headings. Without it **every** insert
+fails with `SQL0443N … JSON2BSON`.
 
-Verify the vectors landed, straight from SQL:
+## Verify the vectors in Db2
+
+The vectors are ordinary Db2 data — you can inspect them without Python:
 
 ```bash
 db2 connect to SAMPLE
@@ -208,22 +507,89 @@ db2 "SELECT COUNT(*) FROM HAYSTACK_DOCUMENTS"
 db2 "SELECT COLNAME, TYPENAME, LENGTH FROM SYSCAT.COLUMNS WHERE TABNAME='HAYSTACK_DOCUMENTS'"
 ```
 
-The `EMBEDDING` column comes back as `VECTOR` with length 384 — Db2 is storing the vectors
-natively, not as a blob.
+**You should see:** 70 rows, and the `EMBEDDING` column reported as type `VECTOR` with length
+`384` — Db2 is storing the vectors natively, not as a blob.
 
-## Layout
+You can even run the similarity search in pure SQL, no application involved:
+
+```bash
+db2 "SELECT SUBSTR(CONTENT,1,60) FROM HAYSTACK_DOCUMENTS \
+     ORDER BY VECTOR_DISTANCE(EMBEDDING, \
+       (SELECT EMBEDDING FROM HAYSTACK_DOCUMENTS FETCH FIRST 1 ROWS ONLY), COSINE) \
+     FETCH FIRST 3 ROWS ONLY"
+```
+
+## Configuration
+
+Everything is in [`.env`](.env.example) — the Db2 connection and the two llama.cpp endpoints:
+
+| Key | Meaning |
+| --- | --- |
+| `DB2_DATABASE` · `DB2_HOSTNAME` · `DB2_PORT` | connection target (`SAMPLE`, `localhost`, `50000`) |
+| `DB2_USERNAME` · `DB2_PASSWORD` | the instance owner and its **OS** password |
+| `DB2_TABLE_NAME` | table to create and query (`HAYSTACK_DOCUMENTS`) |
+| `EMBED_BASE_URL` · `EMBED_MODEL` | the embedding server (`http://127.0.0.1:8081/v1`) |
+| `CHAT_BASE_URL` · `CHAT_MODEL` | the chat server (`http://127.0.0.1:8080/v1`) |
+
+Values that must not drift from the model are constants in
+[src/haystack_db2_rag/settings.py](src/haystack_db2_rag/settings.py), not `.env` keys: the
+384-dimension embedding size, the 448-token chunk budget, and the tokenizer name. Changing them
+in `.env` would have no effect, so they are not offered there.
+
+## Troubleshooting
+
+Symptom → cause → fix. Every row here is a failure hit while building this.
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| Build aborts: `UI: llama-ui-embed failed` / `missing required asset(s): loading.html` | The build fetches a prebuilt web UI that doesn't match tag b9913 | Add `-DLLAMA_BUILD_UI=OFF -DLLAMA_USE_PREBUILT_UI=OFF`; if a partial build already ran, `rm -rf ~/llama.cpp/build/tools/ui` first |
+| Sanity test fails with `KeyError: 'choices'` a second after starting the server | `/health` returns **503** while the model loads, and `curl -s` treats that as success | Use `curl -sf` in the readiness loop |
+| Embedding sanity prints a dim other than 384 | Wrong GGUF, or `--pooling cls` missing | Re-download the model file and pass the flag |
+| `SQL1032N No start database manager command was issued` | Db2 isn't running | `db2start` |
+| `SQL30082N … reason "24" ("USERNAME AND/OR PASSWORD INVALID")` | `AUTHENTICATION=SERVER` — Db2 checks the **OS** password | Put `db2inst1`'s OS password in `DB2_PASSWORD` |
+| Db2 connect fails though the instance is up | `DB2COMM` not set to TCPIP, or `DB2_PORT` ≠ the instance's `SVCENAME` | `db2set DB2COMM=TCPIP; db2stop; db2start`, and check `db2 get dbm cfg \| grep SVCENAME` |
+| `SQL1024N A database connection does not exist` | Running SQL without connecting | `db2 connect to SAMPLE` |
+| **Every** insert fails `SQL0443N … JSON2BSON … JSON parsing error` | Docling's `dl_meta` contains `$ref`; BSON forbids field names starting with `$` | Keep the `SimpleMeta` extractor in `index.py` — it strips `dl_meta` |
+| `ModuleNotFoundError: No module named 'haystack_db2_rag'` | The package lives in `src/` | `export PYTHONPATH=src` |
+| `Connection refused` on `:8081` or `:8080` | A llama.cpp server isn't running | `scripts/llama-servers.sh start`, then `status` |
+| transformers warns `Token indices sequence length is longer … (519 > 512)` | A chunk exceeds the embedding window and is being silently truncated | Lower `EMBED_MAX_TOKENS` in `settings.py` (448 works for this PDF) |
+| First `index` run seems to hang | It's downloading Docling's ~500 MB layout models | Wait it out; subsequent runs are offline and fast |
+
+## What changed from the IBM tutorial
+
+The blog post targets cloud Db2 and watsonx.ai. This repo runs the same architecture entirely on
+one machine:
+
+| Tutorial | Here |
+| --- | --- |
+| Cloud Db2 (`BLUDB`, port 50001, `SECURITY=SSL`) | Local Db2 instance, `SAMPLE`, port 50000, no SSL |
+| `Db2DocumentStore`, `Db2EmbeddingRetriever` | `IBMDb2DocumentStore`, `IBMDb2EmbeddingRetriever` — the class names in `ibm-db-haystack` 0.2.0; the blog's names are from an earlier release |
+| `WatsonxDocumentEmbedder` / `WatsonxTextEmbedder` (`ibm/slate-125m-english-rtrvr`) | `OpenAIDocumentEmbedder` / `OpenAITextEmbedder` → llama.cpp, bge-small-en-v1.5, **dim 384** |
+| `WatsonxChatGenerator` (`ibm/granite-3-2b-instruct`) | `OpenAIChatGenerator` → llama.cpp, Qwen2.5-3B-Instruct |
+| `PromptBuilder` | `ChatPromptBuilder` (Haystack 3.x chat interface) |
+| watsonx API key + project ID | A dummy key + `api_base_url` — llama.cpp ignores the key |
+| Hardcoded sample documents | A real PDF, parsed by **Docling** |
+
+llama.cpp's server speaks the OpenAI API, which is why Haystack's stock OpenAI components work
+against it with nothing but a changed `api_base_url`.
+
+## Repository layout
 
 ```
-src/haystack_db2_rag/
-  settings.py     everything read from .env
-  store.py        connects to Db2 and creates the table
-  index.py        converter -> embedder -> writer
-  ask.py          text_embedder -> retriever -> prompt_builder -> generator
-scripts/
-  llama-servers.sh
-data/
-  M-Lean_Article.pdf    the sample document
+src/haystack_db2_rag/   settings.py (all config, from .env) · store.py (the Db2 connection)
+                        index.py  converter → embedder → writer
+                        ask.py    text_embedder → retriever → prompt_builder → generator
+scripts/                llama-servers.sh  (start · stop · status for both llama.cpp servers)
+data/                   M-Lean_Article.pdf  (the sample document)
 ```
 
 The code is deliberately minimal — no error handling, no retries, no edge cases — so each file
-reads top to bottom. `index.py` recreates the table on every run, which keeps it repeatable.
+reads top to bottom in one sitting.
+
+## License
+
+[Apache-2.0](LICENSE), covering the code in this repository.
+
+`data/M-Lean_Article.pdf` is a published journal article
+(*Information and Software Technology* 113, 2019, © Elsevier), included as sample input. It is
+not covered by this repository's license — replace it with your own document for any other use.
