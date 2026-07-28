@@ -78,6 +78,5 @@ case "${1:-status}" in
   start)  start ;;
   stop)   stop ;;
   status) status ;;
-  restart) stop; sleep 1; start ;;
-  *) echo "usage: $0 {start|stop|restart|status}" >&2; exit 2 ;;
+  *) echo "usage: $0 {start|stop|status}" >&2; exit 2 ;;
 esac

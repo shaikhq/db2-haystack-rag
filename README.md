@@ -138,8 +138,9 @@ export PYTHONPATH=src
 .venv/bin/python -m haystack_db2_rag.ask "What is M-Lean?"
 ```
 
-Put a PDF in `data/` and pass its path. Any PDF, DOCX or HTML file works, since Docling handles
-the parsing. PDFs in `data/` are gitignored.
+`data/M-Lean_Article.pdf` ships with the repo, so a fresh clone runs as-is. Any other PDF, DOCX
+or HTML file works too — drop it in `data/` and pass its path. Only the sample is tracked; other
+files you put there stay out of git.
 
 Pass a page number as a second argument to filter on metadata before the vector search:
 
@@ -221,7 +222,7 @@ src/haystack_db2_rag/
 scripts/
   llama-servers.sh
 data/
-  <your.pdf>      the document to index (gitignored)
+  M-Lean_Article.pdf    the sample document
 ```
 
 The code is deliberately minimal — no error handling, no retries, no edge cases — so each file

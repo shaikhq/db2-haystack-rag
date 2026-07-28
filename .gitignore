@@ -1,22 +1,15 @@
 # Secrets
 .env
-*.pem
-*.key
 
 # Python
 __pycache__/
 *.py[cod]
 .venv/
-venv/
-*.egg-info/
-.pytest_cache/
-.ipynb_checkpoints/
 
-# Editors / OS
+# Editor
 .vscode/
-.idea/
-.DS_Store
 
-# Local data — PDFs you drop in here stay out of git
+# The sample PDF ships with the repo; anything else you drop in data/ stays out
 data/*
+!data/M-Lean_Article.pdf
 logs/
