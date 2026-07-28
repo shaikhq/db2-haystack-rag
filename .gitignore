@@ -20,3 +20,4 @@ venv/
 # Local data
 data/*
 !data/samples/
+logs/

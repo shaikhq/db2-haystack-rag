@@ -1,4 +1,5 @@
-haystack-ai
-ibm-db-haystack
-watsonx-haystack
-python-dotenv
+# Versions verified working together on 2026-07-28
+haystack-ai==3.0.0
+ibm-db-haystack==0.2.0
+python-dotenv==1.2.2
+# ibm-db is pulled in by ibm-db-haystack (3.2.9 here)
