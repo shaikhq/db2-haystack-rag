@@ -29,10 +29,8 @@ This README takes you from **a bare Red Hat machine to answered questions**, one
 time. No prior Db2, Haystack, or embeddings experience assumed. Every command is one you can copy
 and run on its own, and each step ends with something you can check before moving on.
 
-Recreated from the IBM Community tutorial
-[Agentic Workflows with Haystack and IBM Db2](https://community.ibm.com/community/user/blogs/dhruv-chaturvedi/2026/07/10/agentic-workflows-with-haystack-and-ibm-db2),
-which used cloud Db2 and watsonx.ai — see
-[What changed from the IBM tutorial](#what-changed-from-the-ibm-tutorial).
+Recreated from the IBM Community tutorial *Agentic Workflows with Haystack and IBM Db2*, which
+used cloud Db2 and watsonx.ai — see [Learn more](#learn-more) for that and the other references.
 
 ---
 
@@ -54,8 +52,8 @@ which used cloud Db2 and watsonx.ai — see
 - [Verify the vectors in Db2](#verify-the-vectors-in-db2)
 - [Configuration](#configuration)
 - [Troubleshooting](#troubleshooting)
-- [What changed from the IBM tutorial](#what-changed-from-the-ibm-tutorial)
 - [Repository layout](#repository-layout)
+- [Learn more](#learn-more)
 
 ---
 
@@ -556,24 +554,6 @@ Symptom → cause → fix. Every row here is a failure hit while building this.
 | transformers warns `Token indices sequence length is longer … (519 > 512)` | A chunk exceeds the embedding window and is being silently truncated | Lower `EMBED_MAX_TOKENS` in `settings.py` (448 works for this PDF) |
 | First `index` run seems to hang | It's downloading Docling's ~500 MB layout models | Wait it out; subsequent runs are offline and fast |
 
-## What changed from the IBM tutorial
-
-The blog post targets cloud Db2 and watsonx.ai. This repo runs the same architecture entirely on
-one machine:
-
-| Tutorial | Here |
-| --- | --- |
-| Cloud Db2 (`BLUDB`, port 50001, `SECURITY=SSL`) | Local Db2 instance, `SAMPLE`, port 50000, no SSL |
-| `Db2DocumentStore`, `Db2EmbeddingRetriever` | `IBMDb2DocumentStore`, `IBMDb2EmbeddingRetriever` — the class names in `ibm-db-haystack` 0.2.0; the blog's names are from an earlier release |
-| `WatsonxDocumentEmbedder` / `WatsonxTextEmbedder` (`ibm/slate-125m-english-rtrvr`) | `OpenAIDocumentEmbedder` / `OpenAITextEmbedder` → llama.cpp, bge-small-en-v1.5, **dim 384** |
-| `WatsonxChatGenerator` (`ibm/granite-3-2b-instruct`) | `OpenAIChatGenerator` → llama.cpp, Qwen2.5-3B-Instruct |
-| `PromptBuilder` | `ChatPromptBuilder` (Haystack 3.x chat interface) |
-| watsonx API key + project ID | A dummy key + `api_base_url` — llama.cpp ignores the key |
-| Hardcoded sample documents | A real PDF, parsed by **Docling** |
-
-llama.cpp's server speaks the OpenAI API, which is why Haystack's stock OpenAI components work
-against it with nothing but a changed `api_base_url`.
-
 ## Repository layout
 
 ```
@@ -586,6 +566,38 @@ data/                   M-Lean_Article.pdf  (the sample document)
 
 The code is deliberately minimal — no error handling, no retries, no edge cases — so each file
 reads top to bottom in one sitting.
+
+## Learn more
+
+**This project**
+
+- [Agentic Workflows with Haystack and IBM Db2](https://community.ibm.com/community/user/blogs/dhruv-chaturvedi/2026/07/10/agentic-workflows-with-haystack-and-ibm-db2)
+  — the IBM Community tutorial this repo recreates locally.
+- [Build grounded AI applications with the new IBM Db2 integration for Haystack](https://www.ibm.com/new/announcements/build-grounded-ai-applications-with-the-new-ibm-db2-integration-for-haystack)
+  — the IBM announcement of the integration.
+
+**Haystack**
+
+- [Haystack documentation](https://docs.haystack.deepset.ai/docs/intro) — pipelines, components,
+  and the concepts behind them.
+- [Haystack on GitHub](https://github.com/deepset-ai/haystack) — the framework itself.
+
+**The Db2 integration**
+
+- [IBM Db2 Document Store integration](https://haystack.deepset.ai/integrations/ibm-db-document-store)
+  — the integration page, with the current component reference.
+- [`ibm-db-haystack` on PyPI](https://pypi.org/project/ibm-db-haystack/) — the package this
+  project installs (0.2.0 here).
+
+**The other pieces**
+
+- [Docling](https://github.com/docling-project/docling) — the document parser, and
+  [`docling-haystack`](https://pypi.org/project/docling-haystack/), its Haystack integration.
+- [llama.cpp](https://github.com/ggml-org/llama.cpp) — the local model server.
+
+> Following the IBM tutorial alongside this repo? Its code uses `Db2DocumentStore` and
+> `Db2EmbeddingRetriever`; `ibm-db-haystack` 0.2.0 renamed those to `IBMDb2DocumentStore` and
+> `IBMDb2EmbeddingRetriever`, which is what [store.py](src/haystack_db2_rag/store.py) imports.
 
 ## License
 
