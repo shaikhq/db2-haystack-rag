@@ -1,10 +1,10 @@
 """Answer a question using the documents stored in Db2.
 
-    PYTHONPATH=src .venv/bin/python -m haystack_db2_rag.ask "what is M-Lean?"
+    PYTHONPATH=src .venv/bin/python -m haystack_db2_rag.search "what is M-Lean?"
 
 Add a page number to filter on metadata before the search:
 
-    PYTHONPATH=src .venv/bin/python -m haystack_db2_rag.ask "what are the results?" 4
+    PYTHONPATH=src .venv/bin/python -m haystack_db2_rag.search "what are the results?" 4
 
 The pipeline is four components:
     text_embedder -> retriever -> prompt_builder -> generator

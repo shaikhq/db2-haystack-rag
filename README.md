@@ -37,7 +37,9 @@ used cloud Db2 and watsonx.ai — see [Learn more](#learn-more) for that and the
 ## Contents
 
 - [What it does & why](#what-it-does--why)
-- [Architecture](#architecture-one-pdf-many-chunks-one-vector-column)
+- [Architecture: two layers](#architecture-two-layers-over-one-db2-table)
+  - [Ingestion layer](#ingestion-layer--ingestpy)
+  - [Search layer](#search-layer--searchpy)
 - [Full setup on a fresh RHEL box](#full-setup-on-a-fresh-rhel-box) ← the main guide
   - [Step 1 — Db2 12.1.5 + instance](#step-1--db2-1215--instance)
   - [Step 2 — Configure Db2 and create the database](#step-2--configure-db2-and-create-the-database)
@@ -46,7 +48,7 @@ used cloud Db2 and watsonx.ai — see [Learn more](#learn-more) for that and the
   - [Step 5 — Python project](#step-5--python-project)
   - [Step 6 — Configure `.env`](#step-6--configure-env)
   - [Step 7 — Start the servers & verify](#step-7--start-the-servers--verify)
-- [Run the pipeline](#run-the-pipeline-index--ask)
+- [Run the pipeline](#run-the-pipeline-ingest--search)
 - [Try it: example questions](#try-it-example-questions)
 - [How the PDF is chunked](#how-the-pdf-is-chunked-and-why-not-documentsplitter)
 - [Verify the vectors in Db2](#verify-the-vectors-in-db2)
@@ -82,34 +84,79 @@ Everything runs locally. The embedding model (bge-small-en-v1.5, 37 MB) and the 
 (Qwen2.5-3B-Instruct, 2 GB) are served by llama.cpp on this machine, so no document text ever
 leaves the box and there is no API bill.
 
-## Architecture: one PDF, many chunks, one VECTOR column
+## Architecture: two layers over one Db2 table
+
+The system is two Haystack pipelines that never call each other. They meet only in the Db2
+table: the **ingestion layer** writes rows, the **search layer** reads them.
+
+```
+                  ┌──────────────────────────────────────────────┐
+   your PDF  ───▶ │           INGESTION LAYER  (ingest.py)       │
+                  └──────────────────────────────────────────────┘
+                                      │
+                                      ▼
+                  Db2  HAYSTACK_DOCUMENTS (ID, CONTENT, META, EMBEDDING VECTOR(384))
+                                      ▲
+                                      │
+                  ┌──────────────────────────────────────────────┐
+ your question ──▶│            SEARCH LAYER  (search.py)         │──▶ grounded answer
+                  └──────────────────────────────────────────────┘
+```
+
+### Ingestion layer — `ingest.py`
+
+Runs once per document. Turns a PDF into rows in Db2.
 
 ```
 data/M-Lean_Article.pdf
-        │  index.py  (converter → embedder → writer)
-        ▼
-   Docling  ──→  HybridChunker            70 chunks, each carrying
-   (layout,       (448-token budget,      page_number + headings
-    tables,        bge tokenizer)
-    headings)
         │
         ▼
-   OpenAIDocumentEmbedder ──→ llama.cpp :8081  (bge-small-en-v1.5 → 384 floats)
-        │
-        ▼
-   Db2  HAYSTACK_DOCUMENTS (ID, CONTENT, META, EMBEDDING VECTOR(384))
-        ▲
-        │  ask.py  (text_embedder → retriever → prompt_builder → generator)
-        │
-  your question ──→ OpenAITextEmbedder ──→ llama.cpp :8081
-                            │
-                            ▼
-                    IBMDb2EmbeddingRetriever   cosine VECTOR_DISTANCE, top 3
-                            │
-                            ▼
-                    ChatPromptBuilder ──→ OpenAIChatGenerator ──→ llama.cpp :8080
-                                                                  (Qwen2.5-3B-Instruct)
+  ┌───────────┐      ┌────────────┐      ┌────────┐
+  │ converter │ ───▶ │  embedder  │ ───▶ │ writer │ ───▶  Db2 table
+  └───────────┘      └────────────┘      └────────┘
+   Docling +          llama.cpp :8081      INSERT
+   HybridChunker      384 floats/chunk     70 rows
 ```
+
+| # | Component | Haystack class | What it does |
+|---|---|---|---|
+| 1 | `converter` | `DoclingConverter` | Parses the PDF, chunks it with `HybridChunker`, attaches `page_number` + `headings` via `SimpleMeta`. Out: 70 `Document`s with text and metadata, no vectors yet |
+| 2 | `embedder` | `OpenAIDocumentEmbedder` | Sends each chunk to the embedding server on `:8081`; fills in `.embedding` (384 floats) |
+| 3 | `writer` | `DocumentWriter` | Hands the Documents to `IBMDb2DocumentStore`, which `INSERT`s them into `HAYSTACK_DOCUMENTS` |
+
+Wired as `converter → embedder → writer`
+([ingest.py](src/haystack_db2_rag/ingest.py)). The store itself is not a
+component — it is the resource the writer writes into, built by
+[store.py](src/haystack_db2_rag/store.py).
+
+### Search layer — `search.py`
+
+Runs once per question. Turns a question into a grounded answer.
+
+```
+  your question
+        │
+        ▼
+  ┌──────────────┐   ┌───────────┐   ┌────────────────┐   ┌───────────┐
+  │ text_embedder│──▶│ retriever │──▶│ prompt_builder │──▶│ generator │──▶ answer
+  └──────────────┘   └───────────┘   └────────────────┘   └───────────┘
+   llama.cpp :8081    Db2 cosine      excerpts + question   llama.cpp :8080
+   384 floats         top 3 rows      → one prompt          Qwen2.5-3B
+```
+
+| # | Component | Haystack class | What it does |
+|---|---|---|---|
+| 1 | `text_embedder` | `OpenAITextEmbedder` | Embeds the question with the **same model** used at ingestion — vectors from different models are not comparable |
+| 2 | `retriever` | `IBMDb2EmbeddingRetriever` | Runs `VECTOR_DISTANCE(..., COSINE)` in Db2, returns the `top_k=3` nearest Documents (plus their `score`), optionally filtered on metadata first |
+| 3 | `prompt_builder` | `ChatPromptBuilder` | Renders the Jinja template: the retrieved excerpts, then the question |
+| 4 | `generator` | `OpenAIChatGenerator` | Sends that prompt to the chat server on `:8080` and returns the reply |
+
+Wired as `text_embedder → retriever → prompt_builder → generator`
+([search.py](src/haystack_db2_rag/search.py)).
+
+**What links the two layers** is not code but three shared facts: the embedding dimension
+(**384**), the distance metric (**cosine**), and the metadata keys (`page_number`, `headings`).
+Change one on one side only and retrieval breaks — silently.
 
 Two llama.cpp servers, because one `llama-server` process serves one model.
 
@@ -384,7 +431,7 @@ That's the one-time setup — **everything below is the day-to-day workflow.**
 
 ---
 
-## Run the pipeline (index → ask)
+## Run the pipeline (ingest → search)
 
 Two commands. Parse and store the PDF, then ask it questions. Run from the repo root with the
 servers up and Db2 started.
@@ -392,14 +439,14 @@ servers up and Db2 started.
 ```bash
 export PYTHONPATH=src
 
-.venv/bin/python -m haystack_db2_rag.index data/M-Lean_Article.pdf
-.venv/bin/python -m haystack_db2_rag.ask "What is M-Lean?"
+.venv/bin/python -m haystack_db2_rag.ingest data/M-Lean_Article.pdf
+.venv/bin/python -m haystack_db2_rag.search "What is M-Lean?"
 ```
 
-`index` drops and recreates the table each run, so it is always safe to re-run.
+`ingest` drops and recreates the table each run, so it is always safe to re-run.
 **You should see:** `Stored 70 chunks in HAYSTACK_DOCUMENTS.`
 
-> The **first** `index` run also downloads Docling's layout and table-structure models (~500 MB)
+> The **first** `ingest` run also downloads Docling's layout and table-structure models (~500 MB)
 > and the bge tokenizer. After that it works offline. Give the first run a few minutes.
 
 Pass any other document as the argument — PDF, DOCX, or HTML. Drop it in `data/`; only the sample
@@ -408,7 +455,7 @@ PDF is tracked by git, so your own files stay out of the repo.
 Add a page number as a second argument to filter on metadata *before* the vector search:
 
 ```bash
-.venv/bin/python -m haystack_db2_rag.ask "What does the proposed framework look like?" 4
+.venv/bin/python -m haystack_db2_rag.search "What does the proposed framework look like?" 4
 ```
 
 ## Try it: example questions
@@ -419,7 +466,7 @@ chunks, and every answer names where it came from.**
 **A question the document answers well** — the concept is stated in the abstract and the title:
 
 ```
-$ .venv/bin/python -m haystack_db2_rag.ask "What is M-Lean?"
+$ .venv/bin/python -m haystack_db2_rag.search "What is M-Lean?"
 
 Q: What is M-Lean?
 
@@ -440,7 +487,7 @@ Lower scores are closer — they are cosine **distances**, not similarities.
 every hit comes from page 4:
 
 ```
-$ .venv/bin/python -m haystack_db2_rag.ask "What does the proposed framework look like?" 4
+$ .venv/bin/python -m haystack_db2_rag.search "What does the proposed framework look like?" 4
 
 Retrieved:
   [0.298] p.4 5. Proposed framework design: 5. Proposed framework design...
@@ -453,7 +500,7 @@ least-bad chunks, at distances around 0.6), but the prompt tells the model to an
 them, so it declines instead of inventing:
 
 ```
-$ .venv/bin/python -m haystack_db2_rag.ask "What is the capital of France?"
+$ .venv/bin/python -m haystack_db2_rag.search "What is the capital of France?"
 
 A: I'm sorry, but the question "What is the capital of France?" cannot be answered using only
    the excerpts provided from the document... The document does not contain information about
@@ -466,7 +513,7 @@ system that answers this one has stopped being grounded.
 ## How the PDF is chunked (and why not DocumentSplitter)
 
 `DoclingConverter` runs with `ExportType.DOC_CHUNKS` and Docling's `HybridChunker`
-([src/haystack_db2_rag/index.py](src/haystack_db2_rag/index.py)):
+([src/haystack_db2_rag/ingest.py](src/haystack_db2_rag/ingest.py)):
 
 ```python
 chunker = HybridChunker(
@@ -492,7 +539,7 @@ was silently truncated. At 448 the same document yields 70 chunks with a median 
 a maximum of 456 — all comfortably inside the window.
 
 **Why the metadata is trimmed.** Db2 stores document metadata as BSON, which forbids field names
-beginning with `$`. Docling's full `dl_meta` contains `$ref` keys, so `index.py` passes a small
+beginning with `$`. Docling's full `dl_meta` contains `$ref` keys, so `ingest.py` passes a small
 `SimpleMeta` extractor keeping just the page number and headings. Without it **every** insert
 fails with `SQL0443N … JSON2BSON`.
 
@@ -548,18 +595,18 @@ Symptom → cause → fix. Every row here is a failure hit while building this.
 | `SQL30082N … reason "24" ("USERNAME AND/OR PASSWORD INVALID")` | `AUTHENTICATION=SERVER` — Db2 checks the **OS** password | Put `db2inst1`'s OS password in `DB2_PASSWORD` |
 | Db2 connect fails though the instance is up | `DB2COMM` not set to TCPIP, or `DB2_PORT` ≠ the instance's `SVCENAME` | `db2set DB2COMM=TCPIP; db2stop; db2start`, and check `db2 get dbm cfg \| grep SVCENAME` |
 | `SQL1024N A database connection does not exist` | Running SQL without connecting | `db2 connect to SAMPLE` |
-| **Every** insert fails `SQL0443N … JSON2BSON … JSON parsing error` | Docling's `dl_meta` contains `$ref`; BSON forbids field names starting with `$` | Keep the `SimpleMeta` extractor in `index.py` — it strips `dl_meta` |
+| **Every** insert fails `SQL0443N … JSON2BSON … JSON parsing error` | Docling's `dl_meta` contains `$ref`; BSON forbids field names starting with `$` | Keep the `SimpleMeta` extractor in `ingest.py` — it strips `dl_meta` |
 | `ModuleNotFoundError: No module named 'haystack_db2_rag'` | The package lives in `src/` | `export PYTHONPATH=src` |
 | `Connection refused` on `:8081` or `:8080` | A llama.cpp server isn't running | `scripts/llama-servers.sh start`, then `status` |
 | transformers warns `Token indices sequence length is longer … (519 > 512)` | A chunk exceeds the embedding window and is being silently truncated | Lower `EMBED_MAX_TOKENS` in `settings.py` (448 works for this PDF) |
-| First `index` run seems to hang | It's downloading Docling's ~500 MB layout models | Wait it out; subsequent runs are offline and fast |
+| First `ingest` run seems to hang | It's downloading Docling's ~500 MB layout models | Wait it out; subsequent runs are offline and fast |
 
 ## Repository layout
 
 ```
 src/haystack_db2_rag/   settings.py (all config, from .env) · store.py (the Db2 connection)
-                        index.py  converter → embedder → writer
-                        ask.py    text_embedder → retriever → prompt_builder → generator
+                        ingest.py  converter → embedder → writer
+                        search.py  text_embedder → retriever → prompt_builder → generator
 scripts/                llama-servers.sh  (start · stop · status for both llama.cpp servers)
 data/                   M-Lean_Article.pdf  (the sample document)
 ```

@@ -1,6 +1,6 @@
 """Convert a PDF with Docling, embed the chunks, and store them in Db2.
 
-    PYTHONPATH=src .venv/bin/python -m haystack_db2_rag.index data/M-Lean_Article.pdf
+    PYTHONPATH=src .venv/bin/python -m haystack_db2_rag.ingest data/M-Lean_Article.pdf
 
 The pipeline is three components:  converter -> embedder -> writer
 """
