@@ -128,33 +128,59 @@ cp .env.example .env      # then fill in DB2_PASSWORD
 
 ## Usage
 
+Two scripts. Store the documents, then ask questions.
+
 ```bash
 export PYTHONPATH=src
 
-.venv/bin/python -m haystack_db2_rag.cli preflight
-.venv/bin/python -m haystack_db2_rag.cli index --recreate
-.venv/bin/python -m haystack_db2_rag.cli ask "Which savings account has no minimum balance?"
-.venv/bin/python -m haystack_db2_rag.cli ask "What are my options?" --product-type savings --region US
+.venv/bin/python -m haystack_db2_rag.index
+.venv/bin/python -m haystack_db2_rag.ask "Which savings account has no minimum balance?"
 ```
 
-`preflight` checks Db2 connectivity, both endpoints, and that the embedding dimension matches
-`EMBED_DIM` — it fails with a specific message instead of a stack trace deep inside a pipeline.
+Pass a product type as a second argument to filter on metadata before the vector search:
+
+```bash
+.venv/bin/python -m haystack_db2_rag.ask "What are the risks?" investment
+```
+
+Example output:
+
+```
+Q: Which savings account has no minimum balance, and what rate does it pay?
+
+A: The Everyday Savings Account has no minimum balance and pays 2.1% APY.
+
+Retrieved:
+  [0.209] savings: The Everyday Savings Account pays 2.1% APY with no minimum balance and...
+  [0.225] savings: The Premier High-Yield Savings Account pays 4.35% APY but requires a $...
+  [0.333] checking: The Student Checking Account has no minimum balance, no overdraft fee ...
+```
+
+Lower scores are closer — they are cosine *distances*, not similarities.
 
 Verify the vectors landed, straight from SQL:
 
 ```bash
+db2 connect to SAMPLE
 db2 "SELECT COUNT(*) FROM HAYSTACK_DOCUMENTS"
-db2 "SELECT SUBSTR(CONTENT,1,60) FROM HAYSTACK_DOCUMENTS FETCH FIRST 3 ROWS ONLY"
+db2 "SELECT COLNAME, TYPENAME, LENGTH FROM SYSCAT.COLUMNS WHERE TABNAME='HAYSTACK_DOCUMENTS'"
 ```
+
+The `EMBEDDING` column comes back as `VECTOR` with length 384 — Db2 is storing the vectors
+natively, not as a blob.
 
 ## Layout
 
 ```
 src/haystack_db2_rag/
-  config.py       .env -> Db2 settings + the two OpenAI-compatible endpoints
+  settings.py     everything read from .env
   documents.py    sample banking-product corpus with filterable metadata
-  pipelines.py    indexing and query pipelines
-  cli.py          preflight / index / ask
+  store.py        connects to Db2 and creates the table
+  index.py        embedder -> writer
+  ask.py          text_embedder -> retriever -> prompt_builder -> generator
 scripts/
   llama-servers.sh
 ```
+
+The code is deliberately minimal — no error handling, no retries, no edge cases — so each file
+reads top to bottom. `index.py` recreates the table on every run, which keeps it repeatable.
