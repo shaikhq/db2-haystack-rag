@@ -56,6 +56,7 @@ used cloud Db2 and watsonx.ai — see [Learn more](#learn-more) for that and the
   - [Step 7 — Start the servers & verify](#step-7--start-the-servers--verify)
 - [Run the pipeline](#run-the-pipeline-ingest--search)
 - [Try it: example questions](#try-it-example-questions)
+  - [More questions to try](#more-questions-to-try)
 - [How the PDF is chunked](#how-the-pdf-is-chunked-and-why-not-documentsplitter)
 - [Verify the vectors in Db2](#verify-the-vectors-in-db2)
 - [Configuration](#configuration)
@@ -579,7 +580,35 @@ A: The document does not cover the answer to the question "What is the capital o
 ```
 
 That last one is the behaviour to re-check after any change to the prompt or the retriever — a
-RAG system that answers this one has stopped being grounded. It depends on **both** halves of the
+RAG system that answers this one has stopped being grounded.
+
+### More questions to try
+
+All verified against the shipped paper — good starting points for exercising the search layer:
+
+```bash
+.venv/bin/python -m haystack_db2_rag.search "What is a minimum viable model?"
+.venv/bin/python -m haystack_db2_rag.search "What data collection methods does M-Lean use?"
+.venv/bin/python -m haystack_db2_rag.search "Why do predictive models degrade after deployment?"
+.venv/bin/python -m haystack_db2_rag.search "What is the build-measure-learn loop?"
+.venv/bin/python -m haystack_db2_rag.search "What are the limitations of this study?"
+.venv/bin/python -m haystack_db2_rag.search "What are the phases of the M-Lean framework?"
+```
+
+Each is chosen to show a different retrieval behaviour:
+
+| Question | What it demonstrates |
+| --- | --- |
+| *What is a minimum viable model?* | A **definition** stated in one place — the answer is one sentence, cited to a single chunk on p.6. The cleanest illustration of RAG working |
+| *What data collection methods does M-Lean use?* | Information **spread across three sections**; the answer pulls all three phases together from separate chunks |
+| *Why do predictive models degrade after deployment?* | A **"why" question** whose answer is an argument rather than a stated fact — the model has to synthesize from the retrieved passages |
+| *What is the build-measure-learn loop?* | A concept the paper **borrows from Lean Startup**; a good check that answers stay tied to how *this* paper uses the term |
+| *What are the limitations of this study?* | A **standard section of any paper** — try this one when you swap in your own PDF |
+| *What are the phases of the M-Lean framework?* | Instructive **imperfection**: retrieval favours the build-measure-learn chunk, so the answer describes that loop's stages rather than the paper's exploratory/improving phases. Compare `--top-k` values or add the page filter (`… 4`) and watch the answer change |
+
+That last row is worth running deliberately. It shows the thing that matters most in RAG: the
+answer is only ever as good as the chunks the retriever chose, and a confident-sounding answer
+can still be aimed at the wrong part of the document. It depends on **both** halves of the
 generator setup: the "do not use any other knowledge" sentence in the prompt, *and*
 `temperature: 0`. With sampling left on, this same question answered "The capital of France is
 Paris" in 5 of 6 runs.
