@@ -20,13 +20,16 @@ Measured on this implementation, repeating the same query twice:
 | Layer | Deterministic? | Evidence |
 | --- | --- | --- |
 | Embedding + retrieval | **Yes** | Same query → identical ranking and identical scores (`0.308 / 0.418 / 0.430`) on repeated runs |
-| Generation | **No** | Same retrieved chunks → different answer wording on every run (chat sampling is on) |
+| Generation, `temperature: 0` | **Yes, after the first request** | Runs 2 and 3 byte-identical; **run 1 after a server restart differs** — a cold prompt cache changes the numerics enough to alter the sampled path |
+| Generation, sampling on (the old default) | **No** | Same chunks → different wording every run |
 
-**Therefore: never assert on the model's answer text.** Assert on retrieval — which chunks come
-back, in what order, with what metadata — and on *structural* properties of the answer (non-empty,
-mentions a term that appears in the retrieved chunks, declines when nothing relevant was
-retrieved). A test that pins the answer string will fail on the next run and teach the reader to
-ignore failures.
+**Two rules follow.**
+
+1. **Warm up before asserting on generated text.** Discard the first generation after
+   `llama-servers.sh start`; from the second onward it repeats exactly.
+2. **Still prefer asserting on retrieval and on *properties* of the answer** (non-empty, declines,
+   contains a term from a retrieved chunk) rather than exact strings — exact text is stable within
+   one model build but not across a model, llama.cpp, or prompt change.
 
 A second caveat: embedding scores can drift in the **third decimal** across re-ingests, because
 embeddings are recomputed and CPU batching is not bit-stable. Assert on *ordering* and on
@@ -101,7 +104,7 @@ The tests that actually measure whether the system is *good*, not merely running
 | RET-01 | Known-answer retrieval | Ask `"What is M-Lean?"` | Top hit is the title/abstract chunk from **p.1**; top score **< 0.45** |
 | RET-02 | Ranking is deterministic | Run RET-01 twice | Identical ordering and identical `id`s (scores may differ in the 3rd decimal only after a re-ingest) |
 | RET-03 | Filter narrows correctly | `search "..." 4` | **All** hits `p.4`; result set is a subset of the unfiltered run |
-| RET-04 | Grounding holds | Ask `"What is the capital of France?"` | Retrieval still returns 3 chunks at distance ≈ 0.6, and the answer **declines** — no invented fact |
+| RET-04 | Grounding holds | Ask `"What is the capital of France?"`, **10 times** | All 10 decline; none asserts "Paris". This test found a real regression: with the refusal sentence missing from the prompt and sampling on, 5 of 6 runs answered "The capital of France is Paris" |
 | RET-05 | `top_k` is honoured | Set `top_k` to 1 and 10 | Exactly 1 and 10 retrieved lines |
 | RET-06 | Query prefix matters | Remove the bge query prefix and re-run RET-01 | Scores change measurably — documents the prefix is doing work (informational, not pass/fail) |
 
@@ -118,10 +121,10 @@ README's troubleshooting table honest.
 | ID | Induce | Expected error | README row |
 | --- | --- | --- | --- |
 | FAIL-01 | Wrong `DB2_PASSWORD` | `SQL30082N … reason "24"` | "USERNAME AND/OR PASSWORD INVALID" |
-| FAIL-02 | `db2stop` then search | `SQL1032N` | "No start database manager" |
+| FAIL-02 | `db2stop` then search | **`SQL30081N`** communication error (the Python client is over TCP; only the `db2` CLI says `SQL1032N`) | "Db2 isn't running" |
 | FAIL-03 | Embedding server stopped | Connection refused on `:8081` | "Connection refused on :8081 or :8080" |
 | FAIL-04 | Chat server stopped | Connection refused on `:8080` | same row |
-| FAIL-05 | Search before any ingest | Empty/failed retrieval, not a crash loop | — |
+| FAIL-05 | Search before any ingest | `Nothing was retrieved` warning, then a decline — never a confident answer | "Nothing was retrieved" |
 | FAIL-06 | `PYTHONPATH` unset | `ModuleNotFoundError: haystack_db2_rag` | "The package lives in src/" |
 
 ---
@@ -137,6 +140,7 @@ because each has already happened once.
 | REG-02 | A chunk exceeded the 512-token window and was silently truncated | CMP-03 with `EMBED_MAX_TOKENS = 512` | At 512 at least one chunk > 512 tokens on this PDF; at 448, none |
 | REG-03 | `curl -s` treats `/health`'s 503 as ready, so scripts race the model load | `scripts/llama-servers.sh start` from cold, immediately `status` | Reports up only when genuinely ready; never a `KeyError: 'choices'` |
 | REG-04 | llama.cpp build pulls a mismatched prebuilt web UI | Build with the two `-DLLAMA_*_UI=OFF` flags | `Built target llama-server`, no `loading.html` error |
+| REG-06 | One zero-vector row silently kills **all** search | Write a Document with `embedding=[0.0]*384`, run any query, then delete it and re-query | With the row: **0 hits** (and `SQL0801N` division by zero if the same ranking query is run in the `db2` CLI). Without it: `top_k` hits again |
 | REG-05 | Class names drifted from the blog (`Db2DocumentStore` → `IBMDb2DocumentStore`) | `python -c "from haystack_integrations.document_stores.ibm_db import IBMDb2DocumentStore"` | Imports cleanly; pinned by `requirements.txt` |
 
 ---
@@ -157,6 +161,17 @@ DOC-04 exists because three dead keys (`DISTANCE_METRIC`, `EMBED_DIM`, `LLAMACPP
 once advertised in `.env.example` and read by nothing.
 
 ---
+
+## Harness gotchas (learned the hard way)
+
+Any automation written against this stack must avoid two traps that produced false failures on the
+first run of this plan:
+
+- **Db2 CLP connections do not survive `$( )`.** Command substitution forks a subshell, and the
+  CLP back-end process is keyed to the shell's PID, so a `db2 connect` in the parent is invisible
+  inside `$(db2 -x "SELECT …")`. Put the `connect` *inside* the same substitution.
+- **Never count SQL rows with `grep -c .`** — stored `CONTENT` is a CLOB containing newlines, so
+  one row can print as several lines. Use `SELECT COUNT(*)` over a subquery.
 
 ## Out of scope
 

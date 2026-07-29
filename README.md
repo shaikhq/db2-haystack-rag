@@ -534,13 +534,12 @@ $ .venv/bin/python -m haystack_db2_rag.search "What is M-Lean?"
 
 Q: What is M-Lean?
 
-A: M-Lean is an end-to-end development framework designed for predictive models in B2B
-   scenarios. It addresses the challenges of data scientists building models that perform
-   well during the development phase but suffer from performance degradation upon
-   deployment...
+A: M-Lean is an end-to-end development framework for predictive models in B2B scenarios.
+   It addresses the challenges of uncertainty and inefficiency in machine learning models,
+   particularly in the context of deploying models in business-to-business (B2B) settings.
 
 Retrieved:
-  [0.309] p.1 M-Lean: An end-to-end development framework for predictive models in B2B...
+  [0.308] p.1 M-Lean: An end-to-end development framework for predictive models in B2B...
   [0.418] p.4 5. Proposed framework design: Table 1 Proposed framework vs. ...
   [0.430] p.4 5. Proposed framework design: build-measure-learn loop is th...
 ```
@@ -553,26 +552,35 @@ every hit comes from page 4:
 ```
 $ .venv/bin/python -m haystack_db2_rag.search "What does the proposed framework look like?" 4
 
+A: The proposed framework looks like a structured process divided into three phases, each
+   with specific objectives, research questions, and methods for data collection...
+
 Retrieved:
-  [0.298] p.4 5. Proposed framework design: 5. Proposed framework design...
+  [0.298] p.4 5. Proposed framework design: Table 1 Proposed framework vs. ...
   [0.302] p.4 5.1. Getting more from business data: ideas suggestions and data discovery...
   [0.315] p.4 5.1. Getting more from business data: ideas suggestions and data discovery...
 ```
 
 **A question the document cannot answer** — retrieval always returns *something* (the three
-least-bad chunks, at distances around 0.6), but the prompt tells the model to answer only from
-them, so it declines instead of inventing:
+least-bad chunks, here at distances around 0.6), but the prompt tells the model to answer only
+from them, so it declines instead of falling back on what it knows:
 
 ```
 $ .venv/bin/python -m haystack_db2_rag.search "What is the capital of France?"
 
-A: I'm sorry, but the question "What is the capital of France?" cannot be answered using only
-   the excerpts provided from the document... The document does not contain information about
-   capitals or geographical locations.
+A: The document does not cover the answer to the question "What is the capital of France?"
 ```
 
-That last one is the behaviour to check after any change to the prompt or the retriever — a RAG
-system that answers this one has stopped being grounded.
+That last one is the behaviour to re-check after any change to the prompt or the retriever — a
+RAG system that answers this one has stopped being grounded. It depends on **both** halves of the
+generator setup: the "do not use any other knowledge" sentence in the prompt, *and*
+`temperature: 0`. With sampling left on, this same question answered "The capital of France is
+Paris" in 5 of 6 runs.
+
+> **On reproducibility:** at `temperature: 0` the same question gives byte-identical answers —
+> except for the **first** request after a llama.cpp server restart, which differs from every
+> later one because the prompt cache is cold and the numerics differ slightly. If you are
+> comparing outputs, discard the first run after `llama-servers.sh start`.
 
 ## How the PDF is chunked (and why not DocumentSplitter)
 
@@ -655,11 +663,12 @@ Symptom → cause → fix. Every row here is a failure hit while building this.
 | Build aborts: `UI: llama-ui-embed failed` / `missing required asset(s): loading.html` | The build fetches a prebuilt web UI that doesn't match tag b9913 | Add `-DLLAMA_BUILD_UI=OFF -DLLAMA_USE_PREBUILT_UI=OFF`; if a partial build already ran, `rm -rf ~/llama.cpp/build/tools/ui` first |
 | Sanity test fails with `KeyError: 'choices'` a second after starting the server | `/health` returns **503** while the model loads, and `curl -s` treats that as success | Use `curl -sf` in the readiness loop |
 | Embedding sanity prints a dim other than 384 | Wrong GGUF, or `--pooling cls` missing | Re-download the model file and pass the flag |
-| `SQL1032N No start database manager command was issued` | Db2 isn't running | `db2start` |
+| `SQL1032N No start database manager command was issued` (from the `db2` CLI) or `SQL30081N … communication error` (from `ingest`/`search`) | Db2 isn't running. The CLI and the Python client report it differently — the Python client connects over TCP, so it fails at the socket | `db2start` |
 | `SQL30082N … reason "24" ("USERNAME AND/OR PASSWORD INVALID")` | `AUTHENTICATION=SERVER` — Db2 checks the **OS** password | Put `db2inst1`'s OS password in `DB2_PASSWORD` |
 | Db2 connect fails though the instance is up | `DB2COMM` not set to TCPIP, or `DB2_PORT` ≠ the instance's `SVCENAME` | `db2set DB2COMM=TCPIP; db2stop; db2start`, and check `db2 get dbm cfg \| grep SVCENAME` |
 | `SQL1024N A database connection does not exist` | Running SQL without connecting | `db2 connect to SAMPLE` |
 | **Every** insert fails `SQL0443N … JSON2BSON … JSON parsing error` | Docling's `dl_meta` contains `$ref`; BSON forbids field names starting with `$` | Keep the `SimpleMeta` extractor in `ingest.py` — it strips `dl_meta` |
+| Every search prints `Nothing was retrieved` although `SELECT COUNT(*)` shows rows | A row whose embedding is all zeros. `VECTOR_DISTANCE(…, COSINE)` raises **`SQL0801N` division by zero**, which aborts the whole ranking query — the retriever swallows it and returns an empty list, so nothing says *why* | Re-run `ingest` to rebuild the table. To see the real error, run the ranking query in `db2` directly: the CLI prints `SQL0801N` where Python prints nothing |
 | `ModuleNotFoundError: No module named 'haystack_db2_rag'` | The package lives in `src/` | `export PYTHONPATH=src` |
 | `Connection refused` on `:8081` or `:8080` | A llama.cpp server isn't running | `scripts/llama-servers.sh start`, then `status` |
 | transformers warns `Token indices sequence length is longer … (519 > 512)` | A chunk exceeds the embedding window and is being silently truncated | Lower `EMBED_MAX_TOKENS` in `settings.py` (448 works for this PDF) |

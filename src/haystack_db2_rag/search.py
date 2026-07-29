@@ -30,7 +30,8 @@ filters = (
     else None
 )
 
-PROMPT = """Answer the question using only these excerpts from the document.
+PROMPT = """Answer the question using only the excerpts below. If they do not contain
+the answer, say that the document does not cover it — do not use any other knowledge.
 
 {% for doc in documents %}
 {{ doc.content }}
@@ -62,6 +63,9 @@ pipeline.add_component(
         api_key=Secret.from_token(settings.API_KEY),
         model=settings.CHAT_MODEL,
         api_base_url=settings.CHAT_BASE_URL,
+        # temperature 0 = greedy decoding: the same question gives the same answer,
+        # and the "only use the excerpts" instruction is followed consistently.
+        generation_kwargs={"temperature": 0},
     ),
 )
 
@@ -78,8 +82,13 @@ result = pipeline.run(
     include_outputs_from={"retriever"},
 )
 
+documents = result["retriever"]["documents"]
+if not documents:
+    print("\nNothing was retrieved. Either the table is empty (run ingest) or the search "
+          "is failing — see Troubleshooting in the README.")
+
 print(f"\nQ: {question}")
 print(f"\nA: {result['generator']['replies'][0].text}\n")
 print("Retrieved:")
-for doc in result["retriever"]["documents"]:
+for doc in documents:
     print(f"  [{doc.score:.3f}] p.{doc.meta['page_number']} {doc.meta['headings']}: {doc.content[:60]}...")
