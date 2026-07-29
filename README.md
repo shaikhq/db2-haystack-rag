@@ -673,6 +673,7 @@ src/haystack_db2_rag/   settings.py (all config, from .env) · store.py (the Db2
                         search.py  text_embedder → retriever → prompt_builder → generator
 scripts/                llama-servers.sh  (start · stop · status for both llama.cpp servers)
 data/                   M-Lean_Article.pdf  (the sample document)
+docs/                   test-plan.md  (what to test, and why generation can't be asserted on)
 ```
 
 The code is deliberately minimal — no error handling, no retries, no edge cases — so each file
