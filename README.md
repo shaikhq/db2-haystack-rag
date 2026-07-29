@@ -38,6 +38,7 @@ used cloud Db2 and watsonx.ai — see [Learn more](#learn-more) for that and the
 
 - [What it does & why](#what-it-does--why)
 - [Architecture: two layers](#architecture-two-layers-over-one-db2-table)
+  - [Haystack in one minute](#haystack-in-one-minute)
   - [Ingestion layer](#ingestion-layer--ingestpy)
   - [Search layer](#search-layer--searchpy)
 - [Full setup on a fresh RHEL box](#full-setup-on-a-fresh-rhel-box) ← the main guide
@@ -102,6 +103,24 @@ table: the **ingestion layer** writes rows, the **search layer** reads them.
  your question ──▶│            SEARCH LAYER  (search.py)         │──▶ grounded answer
                   └──────────────────────────────────────────────┘
 ```
+
+### Haystack in one minute
+
+If you have used PyTorch or another RAG framework, three Haystack ideas are worth knowing before
+reading the diagrams below — the rest follows from them.
+
+- **A `Document` is the currency.** A dataclass with `content` (the text), `meta` (your
+  metadata dict), `embedding` (the vector), and `score` (set by a retriever). Ingestion creates
+  Documents; search gets them back. Nothing else crosses between the two layers.
+- **A `Pipeline` is a graph, not a chain.** You add components under a name, then wire *named
+  sockets* together: `pipeline.connect("text_embedder.embedding", "retriever.query_embedding")`.
+  The socket names are part of each component's contract, which is why connections are explicit
+  rather than positional.
+- **`run()` is keyed by component name.** You pass inputs only for sockets that no other
+  component feeds — `pipeline.run({"text_embedder": {"text": question}, ...})` — and you get
+  back only the *last* component's output, unless you ask for more with
+  `include_outputs_from={"retriever"}`. That argument is the main debugging tool: it is how
+  `search.py` prints the retrieved chunks.
 
 ### Ingestion layer — `ingest.py`
 
@@ -188,6 +207,12 @@ and runs as **root**; from Step 2 on you work as `db2inst1` (`su - db2inst1`). E
 marked **(root)** or **(db2inst1)** so you always know which identity to use.
 
 **Verified on:** RHEL 10.0, Db2 12.1.5.0, Python 3.12.13, 16 cores / 30 GB RAM, no GPU.
+
+> **Already have Db2 running?** Skip Step 1 entirely and use Step 2 as a checklist instead of an
+> install. You need three things: `db2level` reporting **12.1.2 or later** (the native `VECTOR`
+> type does not exist before it), `db2set -all | grep DB2COMM` showing `TCPIP` (the Python client
+> connects over TCP), and a database to use — any database; put its name in `DB2_DATABASE` at
+> Step 6. Then continue from Step 3.
 
 ---
 
@@ -427,6 +452,32 @@ scripts/llama-servers.sh status
 
 Logs go to `logs/`. Stop them with `scripts/llama-servers.sh stop` when you're done for the day.
 
+**Now check the whole stack in one go**, before spending minutes on an ingest that would fail at
+the last step. This connects to Db2 with the credentials from your `.env` and pings both model
+servers:
+
+```bash
+PYTHONPATH=src .venv/bin/python -c "
+from haystack_db2_rag.store import document_store
+print('Db2 OK —', document_store().count_documents(), 'chunks in the table')"
+
+curl -sf http://127.0.0.1:8081/v1/models >/dev/null && echo "embeddings OK" || echo "embeddings DOWN"
+curl -sf http://127.0.0.1:8080/v1/models >/dev/null && echo "chat OK" || echo "chat DOWN"
+```
+
+**You should see:**
+
+```
+Db2 OK — 0 chunks in the table
+embeddings OK
+chat OK
+```
+
+Zero chunks is correct before your first ingest — the check creates the empty table, which also
+proves the credentials can write. If the Db2 line fails instead, the **last line** of the
+traceback names the cause (`SQL30082N`, `SQL1032N`, …); look it up in
+[Troubleshooting](#troubleshooting).
+
 That's the one-time setup — **everything below is the day-to-day workflow.**
 
 ---
@@ -446,8 +497,21 @@ export PYTHONPATH=src
 `ingest` drops and recreates the table each run, so it is always safe to re-run.
 **You should see:** `Stored 70 chunks in HAYSTACK_DOCUMENTS.`
 
-> The **first** `ingest` run also downloads Docling's layout and table-structure models (~500 MB)
-> and the bge tokenizer. After that it works offline. Give the first run a few minutes.
+**How long these take**, measured on this box (16 CPU cores, no GPU) — everything runs on the
+CPU, so none of it is instant:
+
+| | Time |
+| --- | --- |
+| First `ingest` (downloads Docling's models) | several minutes |
+| Later `ingest` runs, same 15-page PDF | **~50 s** |
+| Each `search` | **~10 s** |
+
+`ingest` prints a `Calculating embeddings` progress bar partway through; `search` prints nothing
+until the answer is complete, because the chat model generates the whole reply before returning.
+Neither is hung.
+
+> The **first** `ingest` run downloads Docling's layout and table-structure models (~500 MB) and
+> the bge tokenizer. After that it works offline.
 
 Pass any other document as the argument — PDF, DOCX, or HTML. Drop it in `data/`; only the sample
 PDF is tracked by git, so your own files stay out of the repo.
