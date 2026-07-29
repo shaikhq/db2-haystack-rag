@@ -34,8 +34,9 @@ This README takes you from **a bare Red Hat machine to answered questions**, one
 time. No prior Db2, Haystack, or embeddings experience assumed. Every command is one you can copy
 and run on its own, and each step ends with something you can check before moving on.
 
-Recreated from the IBM Community tutorial *Agentic Workflows with Haystack and IBM Db2*, which
-used cloud Db2 and watsonx.ai — see [Learn more](#learn-more) for that and the other references.
+Expanded from the IBM Community tutorial *Agentic Workflows with Haystack and IBM Db2* by
+[Dhruv Chaturvedi](https://www.linkedin.com/in/dhruvinsights/), which used cloud Db2 and
+watsonx.ai — see [Learn more](#learn-more) for that and the other references.
 
 ---
 
@@ -730,7 +731,8 @@ reads top to bottom in one sitting.
 **This project**
 
 - [Agentic Workflows with Haystack and IBM Db2](https://community.ibm.com/community/user/blogs/dhruv-chaturvedi/2026/07/10/agentic-workflows-with-haystack-and-ibm-db2)
-  — the IBM Community tutorial this repo recreates locally.
+  by [Dhruv Chaturvedi](https://www.linkedin.com/in/dhruvinsights/) — the IBM Community tutorial
+  this repo expands on.
 - [Build grounded AI applications with the new IBM Db2 integration for Haystack](https://www.ibm.com/new/announcements/build-grounded-ai-applications-with-the-new-ibm-db2-integration-for-haystack)
   — the IBM announcement of the integration.
 
