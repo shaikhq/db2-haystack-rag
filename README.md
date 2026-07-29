@@ -1,4 +1,4 @@
-# RAG on IBM Db2 12.1.5 with Haystack, Docling, and local models
+# RAG on IBM Db2 12.1.2+ with Haystack, Docling, and local models
 
 This tutorial builds **retrieval-augmented generation over your own PDF**, using IBM Db2 as the
 vector database and nothing but local models:
@@ -11,6 +11,11 @@ vector database and nothing but local models:
   [llama.cpp](https://github.com/ggml-org/llama.cpp) behind an OpenAI-compatible API, so
   Haystack's stock OpenAI components work unchanged. No API keys, no cloud, no per-call cost
 - **Orchestration** — [Haystack](https://haystack.deepset.ai/) pipelines, four components end to end
+
+> **Db2 version: 12.1.2 is the minimum.** The native `VECTOR` type and `VECTOR_DISTANCE` were
+> introduced in **12.1.2** — on anything older this project cannot work, because the table it
+> creates has a `VECTOR` column. Any later release is fine; this guide was written and verified on
+> **12.1.5.0**, so you will see that version in the install examples. Check yours with `db2level`.
 
 **The use case: ask questions about a research paper.** The shipped document is
 `data/M-Lean_Article.pdf` — a 15-page journal article on a framework for building predictive
@@ -42,7 +47,7 @@ used cloud Db2 and watsonx.ai — see [Learn more](#learn-more) for that and the
   - [Ingestion layer](#ingestion-layer--ingestpy)
   - [Search layer](#search-layer--searchpy)
 - [Full setup on a fresh RHEL box](#full-setup-on-a-fresh-rhel-box) ← the main guide
-  - [Step 1 — Db2 12.1.5 + instance](#step-1--db2-1215--instance)
+  - [Step 1 — Install Db2 (12.1.2 or later) + instance](#step-1--install-db2-1212-or-later--instance)
   - [Step 2 — Configure Db2 and create the database](#step-2--configure-db2-and-create-the-database)
   - [Step 3 — The local models](#step-3--the-local-models)
   - [Step 4 — Get the code](#step-4--get-the-code)
@@ -198,7 +203,7 @@ Disk, measured on this box:
 | Docling's layout models, cached on first run | 507 MB |
 | **Total** | **~8.5 GB** |
 
-**You will need:** root/sudo for Step 1, the **Db2 12.1.5 server install media** (an IBM
+**You will need:** root/sudo for Step 1, **Db2 server install media, 12.1.2 or later** (an IBM
 entitlement — everything else downloads freely), and internet access. `git`, `gcc-c++`, `make`,
 `curl`, and Python 3.12 ship with RHEL 10; `cmake` does not and is installed below.
 
@@ -216,14 +221,15 @@ marked **(root)** or **(db2inst1)** so you always know which identity to use.
 
 ---
 
-### Step 1 — Db2 12.1.5 + instance
+### Step 1 — Install Db2 (12.1.2 or later) + instance
 
 > **The one step not executed on the machine this guide was written on** — Db2 was already
 > installed here. Everything from Step 2 onward was run end to end. These commands follow the
 > standard Db2 install; if your environment differs, IBM's installation docs are authoritative.
 
-**(root)** You provide the Db2 12.1.5 server install media (the example assumes the tarball
-`v12.1.5_linuxx64_server_dec.tar.gz`).
+**(root)** You provide the Db2 server install media — **any release from 12.1.2 onward**. The
+commands below use the 12.1.5 tarball `v12.1.5_linuxx64_server_dec.tar.gz`; substitute your own
+filename and version if it differs.
 
 **1.1 — Install the one Db2 prerequisite.** On RHEL 10 the missing library is `libxcrypt-compat`
 (it provides the legacy `libcrypt.so.1`; without it `db2_install` fails with `DBT3507E`):
@@ -303,8 +309,9 @@ db2 connect reset
 A row count means Db2 is up and reachable. The project's table is created for you at ingest time
 — nothing to do here.
 
-> Db2 **12.1.2 or later** is required: the native `VECTOR` type does not exist before it. Check
-> with `db2level`. This guide is written against 12.1.5.0.
+> Confirm the version now, before going further: `db2level` must report **12.1.2 or later**.
+> Earlier releases have no `VECTOR` type, so `ingest` fails at `CREATE TABLE`. 12.1.5.0 is what
+> this guide was verified on; anything newer is fine too.
 
 ---
 
@@ -663,6 +670,7 @@ Symptom → cause → fix. Every row here is a failure hit while building this.
 | Build aborts: `UI: llama-ui-embed failed` / `missing required asset(s): loading.html` | The build fetches a prebuilt web UI that doesn't match tag b9913 | Add `-DLLAMA_BUILD_UI=OFF -DLLAMA_USE_PREBUILT_UI=OFF`; if a partial build already ran, `rm -rf ~/llama.cpp/build/tools/ui` first |
 | Sanity test fails with `KeyError: 'choices'` a second after starting the server | `/health` returns **503** while the model loads, and `curl -s` treats that as success | Use `curl -sf` in the readiness loop |
 | Embedding sanity prints a dim other than 384 | Wrong GGUF, or `--pooling cls` missing | Re-download the model file and pass the flag |
+| `CREATE TABLE` fails on the `VECTOR` column during the first `ingest` | Db2 is older than **12.1.2**, which is where the native `VECTOR` type was introduced | `db2level` to confirm, then upgrade — there is no workaround; the type does not exist |
 | `SQL1032N No start database manager command was issued` (from the `db2` CLI) or `SQL30081N … communication error` (from `ingest`/`search`) | Db2 isn't running. The CLI and the Python client report it differently — the Python client connects over TCP, so it fails at the socket | `db2start` |
 | `SQL30082N … reason "24" ("USERNAME AND/OR PASSWORD INVALID")` | `AUTHENTICATION=SERVER` — Db2 checks the **OS** password | Put `db2inst1`'s OS password in `DB2_PASSWORD` |
 | Db2 connect fails though the instance is up | `DB2COMM` not set to TCPIP, or `DB2_PORT` ≠ the instance's `SVCENAME` | `db2set DB2COMM=TCPIP; db2stop; db2start`, and check `db2 get dbm cfg \| grep SVCENAME` |
